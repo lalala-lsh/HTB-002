@@ -1,0 +1,13 @@
+build/
+.vscode/
+.idea/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+.cursor/
+.cache/
+*.md
+firmware_output/
+*.log
+*.py
+managed_components/
