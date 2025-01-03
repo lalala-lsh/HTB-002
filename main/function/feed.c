@@ -112,10 +112,75 @@ static int64_t s_last_good_wall_mono_us = 0;
 /*
 哺光电源管脚初始化，可对红光控制进行关断
 */
+void drv_feed_powerIO_init(SOC_GPIO_ONOFF onoff)
+{
+    static bool is_initialized = false;
+    
+    // 只在第一次调用时进行初始化
+    if (!is_initialized) {
+        gpio_config_t io_conf = {
+            .pin_bit_mask = 1ULL << FEED_POWER_OUTPUT_IO,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = 0,
+            .pull_down_en = 0,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        gpio_config(&io_conf);
+        is_initialized = true;
+    }
+
+    // 设置GPIO电平
+    gpio_set_level(FEED_POWER_OUTPUT_IO, (onoff == SOC_GPIO_OUTPUT_ON) ? 1 : 0);
+}
 
 /*
 哺光管脚初始化，采用LEDCPWM方式初始化，目的是为了进行功率调节
 */
+void feed_gpio_init(void)
+{
+    feed_timecnt = 0;
+    feed_status = FEED_NONE;
+    
+    // 配置PWM定时器
+    ledc_timer_config_t feed_ledc_timer = {
+        .speed_mode       = FEED_PWM_MODE,
+        .timer_num        = FEED_PWM_TIMER,
+        .duty_resolution  = FEED_PWM_DUTY_RES,
+        .freq_hz          = FEED_PWM_FREQUENCY,  // 设置输出频率为5 kHz
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&feed_ledc_timer));
+
+    // 配置左侧PWM通道
+    ledc_channel_config_t feed_ledc_channel_l = {
+        .speed_mode     = FEED_PWM_MODE,
+        .channel        = FEEDL_PWM_CHANNEL,
+        .timer_sel      = FEED_PWM_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = FEEDL_PWM_OUTPUT_IO,
+        .duty           = 0, // 初始占空比为0%
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&feed_ledc_channel_l));
+
+    // 配置右侧PWM通道
+    ledc_channel_config_t feed_ledc_channel_r= {
+        .speed_mode     = FEED_PWM_MODE,
+        .channel        = FEEDR_PWM_CHANNEL,
+        .timer_sel      = FEED_PWM_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = FEEDR_PWM_OUTPUT_IO,
+        .duty           = 0, // 初始占空比为0%
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&feed_ledc_channel_r));
+
+    // 使能摄像头电源
+    camera_power_control(1);
+    
+    // 安装淡入淡出功能
+    ledc_fade_func_install(0);
+}
 
 /**
  * @Author LINJUN
