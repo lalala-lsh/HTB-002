@@ -187,6 +187,23 @@ void feed_gpio_init(void)
  * @brief 蜂鸣器初始化
  */
 
+static void color_light_gpio_init(void)
+{
+    // 设置彩光控制GPIO
+    Xl9535_Set_Io_Direction(PIN_P06, IO_OUTPUT);
+    
+    // 定义所有灯光PIN
+    static const snPinName_t all_led_pins[] = {
+        PIN_P05, PIN_P04, PIN_P03, PIN_P02, PIN_P01, PIN_P00, 
+        PIN_P14, PIN_P12, PIN_P13, PIN_P17, PIN_P16, PIN_P15
+    };
+    
+    // 设置所有灯光PIN为输出且默认关闭状态(高电平关闭)
+    for (int i = 0; i < sizeof(all_led_pins) / sizeof(all_led_pins[0]); i++) {
+        Xl9535_Set_Io_Direction(all_led_pins[i], IO_OUTPUT);
+        Xl9535_Set_Io_Status(all_led_pins[i], IO_HIGH);
+    }
+}
 
 
 
@@ -210,6 +227,14 @@ BEICI功能控制
 开启: 开启灯光闪烁功能
 关闭: 关闭灯光闪烁输出
 */
+void beici_func_set(uint32_t onoff)
+{
+    if (FUNC_ON == onoff) {
+        start_beici_training();
+    } else {
+        stop_beici_training();
+    }
+}
 
 // 开始彩光训练
 
@@ -231,9 +256,30 @@ BEICI功能控制
 // 网络上报或本地存储数据
 
 // 添加灯光控制的辅助函数
+static void set_pins_status(const snPinName_t* pins, int length, uint8_t status) {
+    for (int i = 0; i < length; i++) {
+        Xl9535_Set_Io_Status(pins[i], status);
+    }
+}
 
+static void flash_pins(const snPinName_t* pins, int length, int delay_ms) {
+    set_pins_status(pins, length, IO_LOW);
+    vTaskDelay(delay_ms / portTICK_PERIOD_MS);
+    set_pins_status(pins, length, IO_HIGH);
+}
 
 // 修改颜色切换函数
+static void switch_led_color(void) {
+    if (current_color == COLOR_RED) {
+        drv_feed_powerIO_init(SOC_GPIO_OUTPUT_ON); // 关闭红色
+        Xl9535_Set_Io_Status(PIN_P06, IO_LOW);     // 打开绿色
+        current_color = COLOR_GREEN;
+    } else {
+        Xl9535_Set_Io_Status(PIN_P06, IO_HIGH);    // 关闭绿色
+        drv_feed_powerIO_init(SOC_GPIO_OUTPUT_OFF); // 打开红色
+        current_color = COLOR_RED;
+    }
+}
 
 /** 
  * \brief 更新哺光档位占空比
