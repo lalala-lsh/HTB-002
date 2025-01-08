@@ -138,6 +138,14 @@ static void key_interrupt_task(void *arg)
                         play_voice(FEED_LIGHT);
                         set_func_led(KEY_FUNC_MODE_1, FUNC_ON); // 设置红光指示灯亮起
                         break;
+                    case KEY_FUNC_MODE_1:
+                        key_status++;
+                        //发送语音"彩光模式"
+                        set_func_led(KEY_FUNC_MODE_2, FUNC_ON);//修复彩光指示灯亮起慢的问题 linjun
+                        play_voice(COLOR_LIGHT);
+                        feed_func_set(FUNC_OFF); //关闭红光模式
+                        beici_func_set(FUNC_ON);//开启贝茨模式  
+                        break;
                     case KEY_FUNC_MODE_2:
                         key_status = KEY_FUNC_OFF;
                         beici_func_set(FUNC_OFF);//关闭贝茨模式

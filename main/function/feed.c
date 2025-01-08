@@ -237,6 +237,48 @@ void beici_func_set(uint32_t onoff)
 }
 
 // 开始彩光训练
+static void start_beici_training(void)
+{
+    set_func_led(KEY_FUNC_MODE_2, FUNC_ON);
+    
+    if (feed_status != BEICI_ING) {
+        // 贝西训练开始前也要检查时间有效性
+        ESP_LOGI(TAG, "彩光训练开始前检查时间有效性...");
+        
+        // if (!is_time_valid()) {
+        //     ESP_LOGW(TAG, "时间未同步，彩光训练无法开始！等待时间同步...");
+            
+        //     if (!wait_for_time_sync(30)) {
+        //         ESP_LOGE(TAG, "时间同步失败，彩光训练被中止");
+        //         return;
+        //     }
+            
+        //     ESP_LOGI(TAG, "时间同步成功，可以开始彩光训练");
+        // }
+        
+        feed_status = BEICI_ING;
+        beici_timecnt = 0;
+        
+        // 尝试获取开始时间戳，失败不阻塞功能
+        time_t start_ts = get_safe_timestamp();
+        beici_st = (int)start_ts;
+        beici_start_mono_us = esp_timer_get_time();
+        update_time_anchor_if_valid(start_ts);
+        
+        ESP_LOGI(TAG, "开始彩光训练，start_ts: %ld, mono_us: %lld", (long)beici_st,
+                 (long long)beici_start_mono_us);
+        
+        // 立即禁用图像识别
+        set_decode_flag(false);
+        ESP_LOGI(TAG, "进入彩光模式，禁用图像识别");
+    }
+    
+    current_mode = 0;
+    drv_feed_powerIO_init(SOC_GPIO_OUTPUT_OFF);
+    Xl9535_Set_Io_Status(PIN_P06, IO_LOW);
+    //开启蜂鸣器    LINJUN
+    dal_40hz_beep_control_switch(1);
+}
 
 // 停止彩光训练
 
