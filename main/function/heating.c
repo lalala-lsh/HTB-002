@@ -39,6 +39,13 @@ uint8_t heat_set_status()
 
 
 // 内部工具：立刻打断加热通道上的任何渐变，并把占空比拉成0
+static inline void stop_heating_fade_immediately(void)
+{
+    // 停止任何渐变并关闭通道输出，避免下次开启异常
+    ledc_fade_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3);
+    // 直接停止通道输出，关闭加热PWM，占空比归零
+    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, 0);
+}
 
 void heating_control(uint8_t en_flag)
 {
