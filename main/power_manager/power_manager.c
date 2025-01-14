@@ -140,6 +140,29 @@ static void power_adc_init(void)
 // 初始化电量管理
 
 
+static void power_check_task(void* arg)
+{
+    for(;;) {
+        // 始终进行电量检测
+        power_check();
+        
+        power_timecnt++;
+        // 发出低电量警告
+        if(power_timecnt >= POWER_WARNTIME && power_state == POWER_STATE_LOW){
+            // 检查是否处于训练状态，训练状态下不发送低电量语音警告
+            extern bool training_flag;
+            if(!training_flag) {
+                uint8_t command = POWER_WARNING;
+                xQueueSendFromISR(voice_evt_queue, &command, NULL);
+                ESP_LOGI("POWER", "非训练状态，发送低电量警告");
+            } else {
+                ESP_LOGI("POWER", "训练状态下跳过低电量语音警告");
+            }
+            power_timecnt = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));  // 5秒刷新一次
+    }
+}
 
 
 static uint32_t s_timeout = 0;
