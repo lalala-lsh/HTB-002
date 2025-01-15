@@ -169,5 +169,19 @@ static uint32_t s_timeout = 0;
 // 移除之前添加的 s_first_sleep 变量
 static bool s_is_poweron = false;  // 标识是否为正常开机
 
+static void enter_deepsleep(void)
+{
+    //进入低功耗后关闭音乐  linjun
+    uint8_t command = STOP;
+    xQueueSendFromISR(voice_evt_queue, &command, NULL);
+    
+    // 拓展 IO 拉低
+    extend_IO_sleep();
+    
+    // ESP32S3 低功耗运行
+    const uint64_t ext_wakeup_pin_1_mask = 1ULL << KEY_ONOFF_INPUT_IO;
+    esp_sleep_enable_ext1_wakeup(ext_wakeup_pin_1_mask, ESP_EXT1_WAKEUP_ALL_LOW);////ESP_EXT1_WAKEUP_ANY_HIGH
+    esp_deep_sleep_start();
+}
 
 
