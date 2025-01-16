@@ -368,4 +368,20 @@ void Xl9535_Set_Io_Status_Multiple(snPinName_t pins[], int num_pins, snPinState_
  * 
  * 将所有扩展IO设置为低电平
  */
+void extend_IO_sleep(void)
+{
+    /* 注释部分: 单独控制特定引脚 */
+    // Xl9535_Set_Io_Status(PIN_P07, IO_LOW);  // 关闭红色
+    // Xl9535_Set_Io_Status(PIN_P06, IO_LOW);  // 关闭绿色
+
+    /* 定义所有扩展IO引脚 */
+    snPinName_t pins[] = {
+        PIN_P00, PIN_P01, PIN_P02, PIN_P03, PIN_P04, PIN_P05, PIN_P06, PIN_P07, 
+        PIN_P10, PIN_P11, PIN_P12, PIN_P13, PIN_P14, PIN_P15, PIN_P16, PIN_P17
+    };
+
+    /* 将所有引脚设置为低电平 */
+    Xl9535_Set_Io_Status_Multiple(pins, sizeof(pins) / sizeof(pins[0]), IO_HIGH);
+    Xl9535_Set_Io_Status(PIN_P06, IO_LOW);  // 关闭绿色
+}
 
