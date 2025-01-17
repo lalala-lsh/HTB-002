@@ -103,7 +103,43 @@ static int64_t s_last_good_wall_mono_us = 0;
 /*
 用于设置训练倒计时  linjun
 */
+static void feed_count_down_remind(int timecnt){
+    // 只在有效的倒计时时间播放语音，避免在开始时播放
+    if(timecnt > 0) {
+        switch(timecnt/60){
+            case 1:
+                play_voice(COUNT_DOWN_1);
+                break;
+            case 2:
+                play_voice(COUNT_DOWN_2);
+                break;
+            default:
+                break;  
+        }
+    }
+}
 //linjun
+static void color_count_down_remind(int timecnt){
+    // 只在有效的倒计时时间播放语音，避免在开始时播放
+    if(timecnt > 0) {
+        switch(timecnt/60){
+            case 1:
+                play_voice(COUNT_DOWN_1);
+                break;
+            case 2:
+                play_voice(COUNT_DOWN_2);
+                break;
+            case 3:
+                play_voice(COUNT_DOWN_3);
+                break;
+            case 4:
+                play_voice(COUNT_DOWN_4);
+                break;
+            default:
+                break;  
+        }
+    }
+}
 
 /*
 * 摄像头供电控制
@@ -205,6 +241,10 @@ static void color_light_gpio_init(void)
     }
 }
 
+uint8_t feed_set_status()
+{
+    return feed_status;
+}
 
 
 /*******************************************************************************
@@ -284,6 +324,69 @@ static void start_beici_training(void)
 
 // 关闭当前运行的功能
 
+static void feed_task(void* arg)
+// 哺光任务有两种结束情况：
+// 1、时间到，正常结束—— 通过计数器和状态连同判断，结束后，数据需要上传（有网络）或者本地存储（无网络）
+// 2、时间未到，被切换或者关闭—— 先允许这种情况，如果后面有问题再做成3分钟内允许切换成其他训练也不能关闭
+{
+#if EN_RED_SPARK
+    int duty = 0;
+#endif
+    uint8_t tcount = 0;
+    uint8_t ccount = 0;
+    uint8_t bcount = 0;
+    
+    for(;;) {
+        // 定期同步系统时间与RTC时间
+        if (++time_sync_check_counter >= TIME_SYNC_CHECK_INTERVAL) {
+            sync_system_with_rtc_if_needed();
+            time_sync_check_counter = 0;
+        }
+        
+        // 处理哺光状态
+        if (feed_status == FEED_ING) {
+#if DEBUG_
+            ESP_LOGI(TAG, "feed_status == FEED_ING, feed_timecnt = %ld", feed_timecnt);
+#endif
+            // 处理红光呼吸效果
+#if EN_RED_SPARK
+            handle_red_light_breathing(&duty);
+#endif
+            // 红光训练倒计时提醒
+            if(feed_timecnt % 60 == 0) {
+                feed_count_down_remind(feed_timecnt);
+            }
+            
+            // 检查哺光是否完成
+            if (feed_timecnt >= feed_timecontrol) {
+                handle_feed_completion(&tcount, &ccount, &bcount);
+            }     
+            feed_timecnt++;                  
+        } 
+        
+        // 处理彩光状态
+        if (feed_status == BEICI_ING) {
+            ESP_LOGI("BEICI", "%ld, 进入beici_task", beici_timecnt);
+            // 彩光首次初始化
+            if (beici_first == 0) {
+                initialize_beici_mode();
+            }
+            
+            // 彩光倒计时提醒
+            if(beici_timecnt % 60 == 0) {
+                color_count_down_remind(beici_timecnt);
+            }
+            
+            // 检查彩光是否完成
+            if (beici_timecnt >= color_timecontrol) {
+                handle_beici_completion(&tcount, &ccount, &bcount);
+            }
+            beici_timecnt++;
+        }
+        
+        vTaskDelay(1000 / portTICK_PERIOD_MS);  // 任务延时，防止看门狗复位
+    }
+}
 
 // 处理红光呼吸灯效果
 #if EN_RED_SPARK
@@ -345,3 +448,28 @@ static void switch_led_color(void) {
  **/
 
 
+void feed_ruoshi_moudle_init(void)
+{
+    // 在初始化时确保系统时间与RTC同步
+    sync_system_with_rtc_if_needed();
+    
+    // 初始化配置参数
+    update_feed_duty();
+    update_feed_time();
+    update_color_time();
+    update_camera_status();
+    
+
+    // 初始化GPIO和任务
+    feed_gpio_init();
+    color_light_gpio_init();
+    Pwm_40hz_init();//20250611--LINJUN
+    update_beep_status();//linjun
+
+    // 创建任务
+    xTaskCreate(feed_task, "feed_task", 4096 * 2, NULL, 9, NULL);
+    xTaskCreate(running_light_task, "running_light_task", 4096, NULL, 10, NULL);
+    xTaskCreate(camera_task, "camera_task", 4096, NULL, 11, &cameraTaskHandle);
+    
+    ESP_LOGI(TAG, "哺光和彩光模块初始化完成");
+}

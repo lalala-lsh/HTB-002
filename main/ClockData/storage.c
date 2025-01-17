@@ -142,7 +142,99 @@ DEVICE_WORK_TIME
 
 
 
+static void record_nvs_partition_init(RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    int32_t inited = 0;
+    char* partition = NULL;
 
+    switch (type) {
+        case RECORD_FD:
+            partition = FD_STORAGE_PARTITION;
+            break;
+        case RECORD_RS:
+            partition = RS_STORAGE_PARTITION;
+            break;
+        default:
+            return;
+    }
+    esp_err_t err = nvs_flash_init_partition(partition);   //使用nvs api之前都需要先init
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated and needs to be erased
+        // Retry nvs_flash_init_partition
+        ESP_ERROR_CHECK(nvs_flash_erase_partition(partition));
+        err = nvs_flash_init_partition(partition);
+    }
+    ESP_ERROR_CHECK(err);
+    // Open PARA_SPACENAME 包括 PARA_INITKEY、PARA_DAYKEY键值
+    err = nvs_open_from_partition(partition, PARA_SPACENAME, NVS_READWRITE, &my_handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "ERROR...nvs_open_from_partition!!!");
+    } else {
+        ESP_LOGI("STORAGE", "opening NVS handle Done");
+        // Read
+        ESP_LOGI("STORAGE", "Get PARA_INITKEY from NVS ... ");
+        err = nvs_get_i32(my_handle, PARA_INITKEY, &inited);
+        if (err == ESP_OK) {   //键值获取成功
+            ESP_LOGI("STORGAE", "record partition inited read success");
+            if (inited == INITED) { //已初始化过
+                ESP_LOGI("STORAGE", "record partition have inited, inited = %lx", inited);
+            } else {    // 未初始化过
+                err = nvs_set_i32(my_handle, PARA_INITKEY, INITED); //设置初始化键值参数
+                if(err == ESP_OK) { ESP_LOGI("STORAGE", "1.PARA_INITKEY.set_nvs_i32 Done"); } 
+                    else { ESP_LOGE("STORAGE", "1.PARA_INITKEY.set_nvs_i32 Failed!"); }
+                err = nvs_set_i32(my_handle, PARA_DAYKEY, 0); //设置参数键值参数--上报与否
+                if(err == ESP_OK) { ESP_LOGI("STORAGE", "1.PARA_DAYKEY.set_nvs_i32 Done"); } 
+                    else { ESP_LOGE("STORAGE", "1.PARA_DAYKEY.set_nvs_i32 Failed!"); }
+            }
+        } else { //读取键值参数失败
+            ESP_LOGE("STORAGE", "record partition inited read fail...");
+            switch(err) {
+                case ESP_FAIL:
+                    ESP_LOGE("STORAGE", "inited read fail...ESP_FAIL");
+                    break;
+                case ESP_ERR_NVS_NOT_FOUND://未初始化过
+                    ESP_LOGE("STORAGE", "inited read fail...ESP_ERR_NVS_NOT_FOUND");
+                    err = nvs_set_i32(my_handle, PARA_INITKEY, INITED); //设置参数
+                    if(err == ESP_OK) { ESP_LOGI("STORAGE", "2..PARA_INITKEY.set_nvs_i32 Done"); } 
+                        else { ESP_LOGE("STORAGE", "2.PARA_INITKEY.set_nvs_i32 Failed!"); }
+                    err = nvs_set_i32(my_handle, PARA_DAYKEY, 0); //设置参数
+                    if(err == ESP_OK) { ESP_LOGI("STORAGE", "2..PARA_DAYKEY.set_nvs_i32 Done"); } 
+                        else { ESP_LOGE("STORAGE", "2.PARA_DAYKEY.set_nvs_i32 Failed!"); }
+                    break;
+                case ESP_ERR_NVS_INVALID_HANDLE:
+                    ESP_LOGE("STORAGE", "inited read fail...ESP_ERR_NVS_INVALID_HANDLE");              
+                    break;
+                case ESP_ERR_NVS_INVALID_NAME:
+                    ESP_LOGE("STORAGE", "inited read fail...ESP_ERR_NVS_INVALID_NAME");              
+                    break;
+                case ESP_ERR_NVS_INVALID_LENGTH:
+                    ESP_LOGE("STORAGE", "inited read fail...ESP_ERR_NVS_INVALID_LENGTH");
+                    break;
+                default:
+                    ESP_LOGE("STORAGE", "inited read fail...ESP_FAIL2");
+                    break;
+            }
+        }
+        err = nvs_commit(my_handle);
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done"); } 
+            else { ESP_LOGE("STORAGE", "nvs_commit Failed"); }
+
+        nvs_close(my_handle);
+    }
+    if (inited != INITED) {  //首次初始化
+        report_data_init(type);
+    }
+}
+
+void record_nvs_module_init(void)
+{
+    record_nvs_partition_init(RECORD_FD);
+    record_nvs_partition_init(RECORD_RS);
+    
+    project_data_partition_init();
+}
 
 static UsageRecords_t arrUsageRecords[30][10];
 
@@ -150,15 +242,221 @@ static UsageRecords_t arrUsageRecords[30][10];
 /*
 获取设备是否被激活的标示,在红光、彩光功能开启之前调用
 */
+bool get_actived(void)
+{
+    return s_is_active;
+}
 /*
 该函数用于对激活与取消激活标志设置，及对NVS里的标志进行设置
 激活设置在连接网络且收到系统告知已经激活时调用
 取消激活在双按键被同时按下情况下使用
 */
+void set_active(bool value)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, ACTIVE_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "ERROR...nvs_open_from_partition!!!PROJECT_STORAGE_PARTITION");
+    } else {
+        if (value == 0x01) {  //激活
+            //先写NVS
+            err = nvs_set_i32(my_handle, ACTIVE_KEY, ACTIVE_DONE); //设置参数，激活
+            if(err == ESP_OK) { ESP_LOGI("STORAGE", "2..ACTIVE_KEY.set_nvs_i32 Done"); } 
+                else { ESP_LOGE("STORAGE", "2.ACTIVE_KEY.set_nvs_i32 Failed!"); }
+            s_is_active = ACTIVED;
+        } else {              //取消激活
+             //先写NVS
+            err = nvs_set_i32(my_handle, ACTIVE_KEY, 0x00000000); //设置参数，未激活
+            if(err == ESP_OK) { ESP_LOGI("STORAGE", "2..ACTIVE_KEY.set_nvs_i32 Done"); } 
+                else { ESP_LOGE("STORAGE", "2.ACTIVE_KEY.set_nvs_i32 Failed!"); }
+            s_is_active = NOT_ACTIVE; //置标志位
+        }      
+    }
+}
 
+void project_data_partition_init(void)
+{
+    nvs_handle_t my_handle;
+    int32_t actived = 0;
+    esp_err_t err = nvs_flash_init_partition(PROJECT_STORAGE_PARTITION);   //使用nvs api之前都需要先init
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase_partition(PROJECT_STORAGE_PARTITION));
+        err = nvs_flash_init_partition(PROJECT_STORAGE_PARTITION);
+    }
+    ESP_ERROR_CHECK(err);
 
+    err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, ACTIVE_SPACENAME, NVS_READWRITE, &my_handle);
 
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "ERROR...nvs_open_from_partition!!!PROJECT_STORAGE_PARTITION");
+    } else {
+        ESP_LOGI("STORAGE", "project...opening NVS handle Done");
+        // Read
+        err = nvs_get_i32(my_handle, ACTIVE_KEY, &actived);  //读取激活与否参数的键值对
+        if (err == ESP_OK) {   // 键值获取成功，表示不是第一次进来
+            ESP_LOGI("STORGAE", "ACTIVE_KEY read success");
+            if (actived == ACTIVE_DONE) { //已激活过
+                ESP_LOGI("STORAGE", "device is actived = %lx", actived);
+                s_is_active = ACTIVED;
+            } else {    // 未激活过
+                s_is_active = NOT_ACTIVE;
+            }
+        } else { // 读取键值参数失败
+            ESP_LOGE("STORAGE", "atcive read fail...");
+            switch(err) {
+                case ESP_FAIL:
+                    ESP_LOGE("STORAGE", "atcive read fail...ESP_FAIL");
+                    break;
+                case ESP_ERR_NVS_NOT_FOUND://未初始化过
+                    ESP_LOGE("STORAGE", "atcive read fail...ESP_ERR_NVS_NOT_FOUND");
+                    err = nvs_set_i32(my_handle, ACTIVE_KEY, 0x00000000); //设置参数--首次创建，未激活
+                    if(err == ESP_OK) { ESP_LOGI("STORAGE", "2..ACTIVE_KEY.set_nvs_i32 Done"); } 
+                        else { ESP_LOGE("STORAGE", "2.ACTIVE_KEY.set_nvs_i32 Failed!"); }
+                    break;
+                case ESP_ERR_NVS_INVALID_HANDLE:
+                    ESP_LOGE("STORAGE", "atcive read fail...ESP_ERR_NVS_INVALID_HANDLE");              
+                    break;
+                case ESP_ERR_NVS_INVALID_NAME:
+                    ESP_LOGE("STORAGE", "atcive read fail...ESP_ERR_NVS_INVALID_NAME");              
+                    break;
+                case ESP_ERR_NVS_INVALID_LENGTH:
+                    ESP_LOGE("STORAGE", "atcive read fail...ESP_ERR_NVS_INVALID_LENGTH");
+                    break;
+                default:
+                    ESP_LOGE("STORAGE", "atcive read fail...ESP_FAIL2");
+                    break;
+            }
+        }
+        err = nvs_commit(my_handle);
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done"); } 
+            else { ESP_LOGE("STORAGE", "nvs_commit Failed"); }
 
+        nvs_close(my_handle);
+    }
+}
+
+void RTC_NVS_init(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, "RTC_NVS", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("RTC", "Error (%s) opening NVS handle", esp_err_to_name(err));
+    } else {
+        ESP_LOGI("RTC", "Open NVS handle done");
+
+        int RTC_flag = 0; 
+        err = nvs_get_i32(my_handle, "RTC_flag", &RTC_flag); 
+
+        switch (err) {
+            case ESP_OK:
+                ESP_LOGI("RTC", "RTC_flag = %d", RTC_flag);
+                if(RTC_flag != 1) {
+                    RTCTime_init();
+                    RTC_flag = 1;
+                    err = nvs_set_i32(my_handle, "RTC_flag", RTC_flag);
+                    if(err == ESP_OK){ ESP_LOGI("STORAGE", "Done");} 
+                        else {ESP_LOGE("STORAGE", "Failed");}
+                    err = nvs_commit(my_handle);
+                    if(err == ESP_OK){ ESP_LOGI("STORAGE", "Done");} 
+                        else{ESP_LOGE("STORAGE", "Failed");}
+                } else {
+                    // 即使已经初始化过，也要确保时间同步是最新的
+                    bool sync_result = RTCTimeToSystemTime();
+                    
+                    // 记录同步时间，用于校验时间是否正确
+                    time_t rtc_time = get_rtc_timestamp();
+                    struct tm timeinfo;
+                    localtime_r(&rtc_time, &timeinfo);
+                    ESP_LOGI("RTC", "RTC时间已同步: %04d-%02d-%02d %02d:%02d:%02d", 
+                             timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+                    
+                    // 检查时间是否合理，如果年份小于2024可能是默认时间，需要网络同步
+                    if (timeinfo.tm_year + 1900 < 2024) {
+                        ESP_LOGW("RTC", "RTC时间不是网络同步时间 (%d年)，RTCTimeSet_flag设为false", 
+                                timeinfo.tm_year + 1900);
+                        RTCTimeSet_flag = false;  // 标记为需要网络同步
+                    } else {
+                        RTCTimeSet_flag = sync_result;  // 只有同步成功且时间合理才设置为true
+                        ESP_LOGI("RTC", "RTC时间合理，RTCTimeSet_flag = %s", 
+                                RTCTimeSet_flag ? "true" : "false");
+                    }
+                }
+                break;
+
+            case ESP_ERR_NVS_NOT_FOUND:
+                ESP_LOGI("RTC", "The value is not initialized yet");
+                RTCTime_init();
+                RTC_flag = 1;
+                // 注意：RTCTime_init只是设置默认时间(2023年)，不是真正有效的时间
+                // RTCTimeSet_flag保持false，只有网络时间同步后才设置为true
+                ESP_LOGW("RTC", "RTC初始化完成 (默认时间2023年)，RTCTimeSet_flag保持false，需要网络同步");
+                err = nvs_set_i32(my_handle, "RTC_flag", RTC_flag);
+                if(err == ESP_OK){ ESP_LOGI("STORAGE", "Done");} 
+                    else {ESP_LOGE("STORAGE", "Failed");}
+                err = nvs_commit(my_handle);
+                if(err == ESP_OK){ ESP_LOGI("STORAGE", "Done");} 
+                    else {ESP_LOGE("STORAGE", "Failed");}
+                break;
+
+            default :
+                ESP_LOGE("RTC", "Error (%s) reading NVS handle", esp_err_to_name(err));
+        }
+    }
+    nvs_close(my_handle); // Close
+    
+    // 确保RTC时间与系统时间同步
+    sync_system_with_rtc_if_needed();
+}
+
+int set_SNCode(uint8_t* sn_code)
+{
+    // open NVS
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, "SNCode_NVS", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("SNCode", "Error (%s) opening NVS handle", esp_err_to_name(err));
+        nvs_close(my_handle); // Close
+        return 0;
+    } else {
+        ESP_LOGI("SNCode", "Open NVS handle done");
+        err = nvs_set_blob(my_handle, "SNCode", sn_code, 16);
+        err = nvs_commit(my_handle);
+        ESP_LOGI("SNCode", "SNCode has been set");
+        nvs_close(my_handle); // Close
+        return 1;
+    }     
+}
+
+void get_SNCode()
+{
+    // open NVS
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, "SNCode_NVS", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("RTC", "Error (%s) opening NVS handle", esp_err_to_name(err));
+    } else {
+        ESP_LOGI("SNCode", "Open NVS handle done");
+        // uint8_t sn_code[16];
+        size_t blob_length = 16;
+        // ESP_LOGI("SNCode", "blob_length:%d", blob_length);
+        err = nvs_get_blob(my_handle, "SNCode", user_data, &blob_length);
+        switch (err) {
+            case ESP_OK:
+                ESP_LOGI("SNCode", "get SNCode successfully");
+                ESP_LOGI("SNCode", "%s", user_data);
+                break;
+
+            case ESP_ERR_NVS_NOT_FOUND:
+                ESP_LOGW("SNCode", "The value is not initialized yet");
+                break;
+
+            default :
+                ESP_LOGE("SNCode", "Error (%s) reading NVS handle", esp_err_to_name(err));
+        }
+    }
+    nvs_close(my_handle); // Close
+}
 
 // 获取 i32 类型的数据
 
