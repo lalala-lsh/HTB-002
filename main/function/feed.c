@@ -97,8 +97,96 @@ static uint32_t time_sync_check_counter = 0;
 static time_t s_last_good_wall_ts = 0;
 static int64_t s_last_good_wall_mono_us = 0;
 
+static void update_time_anchor_if_valid(time_t ts)
+{
+    if (ts >= 1704067200) {
+        s_last_good_wall_ts = ts;
+        s_last_good_wall_mono_us = esp_timer_get_time();
+    }
+}
 
+static time_t estimate_wall_time_from_anchor(void)
+{
+    if (s_last_good_wall_ts <= 0 || s_last_good_wall_mono_us <= 0) {
+        return 0;
+    }
+    int64_t now_mono_us = esp_timer_get_time();
+    int64_t delta_sec = (now_mono_us - s_last_good_wall_mono_us) / 1000000;
+    return s_last_good_wall_ts + (time_t)delta_sec;
+}
 
+static void resolve_training_timestamps(time_t *start_time, time_t *end_time, uint32_t work_time_sec)
+{
+    // ============ 时间源可信度分析 ============
+    //
+    // ESP32系统时钟 time() 特性：
+    //   - 开机时由 RTCTimeToSystemTime() 从 DS1302 或 NVS 设置初始值
+    //   - 设置后走时准确（基于ESP32内部晶振，不受DS1302影响）
+    //   - SNTP同步后绝对时间最精准
+    //
+    // DS1302 外部RTC 特性：
+    //   - 走时可能严重偏慢（实测180秒真实时间只走86秒）
+    //   - 每次调用 get_rtc_timestamp() 读到的是偏慢的时间
+    //   - 绝对不能用两次RTC读数之差来计算时长
+    //
+    // Monotonic时钟 esp_timer_get_time() 特性：
+    //   - 时长绝对准确，但没有绝对时间含义
+    //
+    // ============ 解算策略 ============
+    //
+    // end_time: 优先取系统时间 time()（无论是否SNTP同步过，走时都准）
+    // start_time: end_time - work_time_sec（monotonic时长反推）
+    // 这样保证: END - START == WORK_TIME 恒成立
+    //
+    // 场景覆盖:
+    //   A. 联网+SNTP同步: end取SNTP校准后的time() → 绝对时间精准
+    //   B. 开机按键后才联网: 训练中途SNTP同步 → end取校准后time() → 精准
+    //   C. 全程断网: end取开机时从RTC/NVS初始化的time() → 走时准，绝对值可能有偏
+    //   D. RTC坏+断网+NVS无备份: time()可能是默认2025年 → 走时准但绝对值不对
+    //   以上所有场景 END-START==WORK_TIME 均成立
+
+    time_t sys_time = time(NULL);
+
+    // 优先级1: 系统时间有效（>=2024年）—— 无论是否SNTP同步，走时都准
+    // SNTP同步过则绝对时间精准；未同步则绝对值可能有偏但时长正确
+    if (sys_time >= 1704067200) {
+        *end_time = sys_time;
+        *start_time = sys_time - (time_t)work_time_sec;
+
+        extern bool RTCTimeSet_flag;
+        ESP_LOGI("RESOLVE_TS", "系统时间有效(SNTP=%s): end=%ld, start=%ld, work=%lu",
+                 RTCTimeSet_flag ? "已同步" : "未同步",
+                 (long)*end_time, (long)*start_time, (unsigned long)work_time_sec);
+        return;
+    }
+
+    // 优先级2: 系统时间无效，用锚点(上次有效时间 + monotonic增量)估算
+    time_t estimated_now = estimate_wall_time_from_anchor();
+    if (estimated_now >= 1704067200) {
+        *end_time = estimated_now;
+        *start_time = estimated_now - (time_t)work_time_sec;
+        ESP_LOGI("RESOLVE_TS", "使用锚点估算: end=%ld, start=%ld, work=%lu",
+                 (long)*end_time, (long)*start_time, (unsigned long)work_time_sec);
+        return;
+    }
+
+    // 优先级3: 开始时记录的时间戳有效，用它正推end
+    // 注意：这个start来自训练开始时的 get_safe_timestamp()，可能是RTC读数
+    // 虽然RTC走时偏慢，但至少start那一刻的绝对时间是当时最佳估计
+    if (*start_time >= 1704067200) {
+        *end_time = *start_time + (time_t)work_time_sec;
+        ESP_LOGW("RESOLVE_TS", "系统时间无效，用start正推: start=%ld, end=%ld, work=%lu",
+                 (long)*start_time, (long)*end_time, (unsigned long)work_time_sec);
+        return;
+    }
+
+    // 所有时间源都不可用（极端情况：RTC坏+断网+NVS无备份+默认时间<2024年）
+    // 仍然保存记录，时间戳为0，至少work_time是准的
+    ESP_LOGW("RESOLVE_TS", "所有时间源不可用, start=0, end=0, work=%lu",
+             (unsigned long)work_time_sec);
+    *start_time = 0;
+    *end_time = 0;
+}
 
 /*
 用于设置训练倒计时  linjun
