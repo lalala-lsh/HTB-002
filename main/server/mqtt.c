@@ -37,12 +37,23 @@ static char c_client_id[30];                          /**< MQTT客户端ID */
  * 
  * @return esp_mqtt_client_handle_t MQTT客户端句柄
  */
+esp_mqtt_client_handle_t get_mqtt_client()
+{
+    if (client_now == NULL) {
+        ESP_LOGI(TAG, "GET MQTT CLIENT NULL");
+    }
+    return client_now;
+}
 
 /**
  * @brief 获取当前MQTT连接状态
  * 
  * @return mqtt_state_t 当前MQTT状态
  */
+mqtt_state_t get_mqtt_status()
+{
+    return mqtt_state;
+}
 
 /**
  * @brief MQTT事件处理回调函数

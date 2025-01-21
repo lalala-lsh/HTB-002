@@ -88,14 +88,123 @@ static char* server_keys [] = {
 /* 蓝牙控制的软定时器中断函数 */
 esp_timer_handle_t periodic_timer;
  
+void hash(unsigned char *output, const unsigned char *input, size_t input_len, mbedtls_md_type_t md_type) // 使用MD5哈希算法
+{
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 0);
+    mbedtls_md_starts(&ctx);
+    mbedtls_md_update(&ctx, input, input_len);
+    mbedtls_md_finish(&ctx, output);
+    mbedtls_md_free(&ctx);
+}
 
+unsigned int mod(unsigned char *hash_value, unsigned int mod_num) // 取模运算
+{
+    unsigned int result = 0;
+    for (int i = 0; i < 16; i++) {
+        result <<= 8;            // 每次将结果左移8位
+        result += hash_value[i]; // 加上当前字节
+        result %= mod_num;       // 取模
+    }
+	if(result == 0) result = mod_num;
+    return result;
+}
+uint8_t * get_mac()
+{
+	return base_mac_;
+}
 
+void read_mac()
+{
+	esp_err_t ret = ESP_OK;
+	ret = esp_efuse_mac_get_default(base_mac_);
+	
+	if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get base MAC address from EFUSE BLK0. (%s)", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Aborting");
+        abort();
+    } else {
+        ESP_LOGI(TAG, "Base MAC Address read from EFUSE BLK0");
+        ESP_LOGI(TAG, "Using \"0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x\" as base MAC address",
+            base_mac_[0], base_mac_[1], base_mac_[2], base_mac_[3], base_mac_[4], base_mac_[5]);
+    }
+	build_pp_topic();
+}
 
+void build_pp_topic()
+{
+	snprintf(devicestr, 20, "%02x%02x%02x%02x%02x%02x", base_mac_[0], base_mac_[1], base_mac_[2], base_mac_[3], base_mac_[4], base_mac_[5]);
+	snprintf(ble_mac, 20, "%02x%02x%02x%02x%02x%02x", base_mac_[0], base_mac_[1], base_mac_[2], base_mac_[3], base_mac_[4], base_mac_[5]+2);
+	// printf("蓝牙MAC地址：%s\n", ble_mac);
+	/*对于设备码进行哈希取模处理*/
+	unsigned char hash_value[16]; 
+	hash(hash_value, (unsigned char*)devicestr, sizeof(devicestr), HASH_MD5);   // 转为无符号指针形式 / 对buf中的数据进行哈希运算
+	unsigned int result = mod(hash_value, 2);									// 对哈希值进行取模运算
 
+	memcpy(c_user_data, user_data, sizeof(user_data)); // 构造user_data的字符数组形式
+	ESP_LOGI("BUILD_TOPIC", "%s", c_user_data);
 
+    snprintf(push_topic, 64, "%s%u/%s/htb_pub", TOPIC, result, c_user_data);
+	snprintf(pull_topic, 64, "%s%s/htb_sub", TOPIC, c_user_data);
+}
 
+char * get_pub_tpc()
+{
+	return push_topic;
+}
 
+char * get_sub_tpc()
+{
+	return pull_topic;
+}
 
+char * get_device_str()
+{
+	return devicestr;
+}
+
+char * g_get_ble_mac()
+{
+	return ble_mac;
+}
+
+void build_heartbeat(esp_mqtt_client_handle_t client){
+
+	if(get_mqtt_status() ==  MQTT_EVENT_CONNECTED_)
+	{
+		cJSON *root = NULL;
+		
+		char rid[30];
+		time_t rawtime;
+		uint64_t current_time_ms = esp_timer_get_time()/1000;
+		int ms_pre = current_time_ms%1000;
+		int power_up = power;
+
+		snprintf(rid, 30, "%s%ld%d", c_user_data, (long)time(&rawtime), ms_pre);
+		
+		// ESP_LOGI(TAG, "sent publish successful, heartbeat, topic:%s, devid:%s, rid:%s", get_pub_tpc(), c_user_data, rid);
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "CMD", CMD_HEARTBEAT);
+		cJSON_AddStringToObject(root, "VERSION", device_version);
+		cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+		cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+		cJSON_AddNumberToObject(root, "DEVICE_TIME", time(NULL));
+		cJSON_AddNumberToObject(root, "DEVICE_POWER", power_up);
+		cJSON_AddStringToObject(root, "RID", rid);
+
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root);
+		int msg_id;
+		(void)msg_id;
+		msg_id = esp_mqtt_client_publish(client, get_pub_tpc(), String, strlen(String), 0, 0);
+		ESP_LOGI(TAG, "sent publish successful, heartbeat, msg_id=%d", msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+
+		ESP_LOGI(TAG, "心跳发送成功");
+	}
+}
 
 //是否需要该函数，用于上传当前训练状态--linjun
 
