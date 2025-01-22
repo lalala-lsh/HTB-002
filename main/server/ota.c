@@ -52,6 +52,24 @@ extern QueueHandle_t voice_evt_queue;
  * 
  * @param version 用于存储版本信息的字符数组
  */
+void getVersion(char* version)
+{
+    const esp_partition_t* running_partition = esp_ota_get_running_partition();
+
+    if (running_partition) {
+        esp_app_desc_t app_desc;
+        esp_err_t err = esp_ota_get_partition_description(running_partition, &app_desc);
+
+        if (err == ESP_OK) {
+            strcpy(version, app_desc.version);
+        } else {
+            ESP_LOGE(TAG, "Error getting partition description: %d", err);
+            strcpy(version, "wrong version");
+        }
+    } else {
+        strcpy(version, "no partition");
+    }
+}
 
 /**
  * @brief OTA事件处理回调函数
