@@ -38,6 +38,33 @@ static struct {
  * @brief 检查并打印存储空间状态
  * @return esp_err_t 
  */
+static esp_err_t check_storage_space(void)
+{
+    size_t total = 0, used = 0;
+    esp_err_t ret = esp_spiffs_info(spiffs_conf.partition_label, &total, &used);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get SPIFFS info: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    float used_percent = (used * 100.0) / total;
+    ESP_LOGI(TAG, "存储空间状态:");
+    ESP_LOGI(TAG, "  - 总容量: %d 字节 (%.2f KB)", total, total/1024.0);
+    ESP_LOGI(TAG, "  - 已使用: %d 字节 (%.2f KB)", used, used/1024.0);
+    ESP_LOGI(TAG, "  - 可用空间: %d 字节 (%.2f KB)", total - used, (total-used)/1024.0);
+    ESP_LOGI(TAG, "  - 使用率: %.1f%%", used_percent);
+
+    if (used > total) {
+        ESP_LOGW(TAG, "存储空间信息不一致，执行SPIFFS检查");
+        ret = esp_spiffs_check(spiffs_conf.partition_label);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS check failed: %s", esp_err_to_name(ret));
+        }
+    }
+    
+    return ret;
+}
 
 /**
  * @brief 删除指定文件
@@ -50,6 +77,27 @@ static struct {
 /**
  * @brief 确保有足够的存储空间
  */
+static esp_err_t ensure_storage_space(size_t required_size)
+{
+    size_t total = 0, used = 0;
+    esp_err_t ret = esp_spiffs_info(spiffs_conf.partition_label, &total, &used);
+    if (ret != ESP_OK) return ret;
+
+    size_t available = total - used;
+    while (available < required_size) {
+        if (delete_oldest_image() != ESP_OK) {
+            return ESP_FAIL;
+        }
+        
+        ret = esp_spiffs_info(spiffs_conf.partition_label, &total, &used);
+        if (ret != ESP_OK) return ret;
+        
+        available = total - used;
+        ESP_LOGI(TAG, "After deletion - Available: %d", available);
+    }
+
+    return ESP_OK;
+}
 
 /**
  * @brief 确保图片数量不超过限制
@@ -62,7 +110,26 @@ static struct {
  * @brief 清理超过90天的图片
  */
 
+void init_temp_storage(void)
+{
+    memset(&temp_storage, 0, sizeof(temp_storage));
+}
 
+void start_training_session_with_code(uint32_t rcg_code)
+{
+    for (int i = 0; i < MAX_TEMP_IMAGES; i++) {
+        if (temp_storage.images[i].data) {
+            free(temp_storage.images[i].data);
+            temp_storage.images[i].data = NULL;
+        }
+        temp_storage.images[i].used = false;
+    }
+    temp_storage.current_index = 0;
+    temp_storage.training_active = true;
+    temp_storage.current_rcg_code = rcg_code;  // 保存RCG_CODE
+    
+    ESP_LOGI(TAG, "开始训练会话，RCG_CODE: %lu", rcg_code);
+}
 
 
 /**
@@ -76,6 +143,27 @@ static struct {
  * @param image_size 图片大小
  */
 
+esp_err_t spiffs_init(void)
+{
+    ESP_LOGI(TAG, "初始化SPIFFS文件系统");
+    esp_err_t ret = esp_vfs_spiffs_register(&spiffs_conf);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPIFFS初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // 检查存储空间
+    check_storage_space();
+    
+    // 清理过期文件
+    clean_expired_images();
+    
+    // 确保图片数量限制
+    ensure_image_count_limit();
+    
+    return ESP_OK;
+}
 #if 1
 /**
  * @brief 测试存储容量极限
