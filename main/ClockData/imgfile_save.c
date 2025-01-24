@@ -69,10 +69,61 @@ static esp_err_t check_storage_space(void)
 /**
  * @brief 删除指定文件
  */
+static esp_err_t delete_file(const char* filepath)
+{
+    if (remove(filepath) != 0) {
+        ESP_LOGE(TAG, "Failed to delete file: %s", filepath);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Deleted file: %s", filepath);
+    return ESP_OK;
+}
 
 /**
  * @brief 获取并删除最早的图片
  */
+static esp_err_t delete_oldest_image(void)
+{
+    DIR *dir = opendir("/spiffs");
+    if (!dir) {
+        ESP_LOGE(TAG, "Failed to open SPIFFS directory");
+        return ESP_FAIL;
+    }
+
+    struct dirent *entry;
+    time_t oldest_time = time(NULL);
+    char oldest_file[MAX_FILENAME_LEN] = {0};  // 修改这里
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strlen(entry->d_name) == 19 && strstr(entry->d_name, ".jpg")) {
+            struct tm file_time = {0};
+            char year_str[5] = {0}, month_str[3] = {0}, day_str[3] = {0};
+            
+            strncpy(year_str, entry->d_name, 4);
+            strncpy(month_str, entry->d_name + 4, 2);
+            strncpy(day_str, entry->d_name + 6, 2);
+            
+            file_time.tm_year = atoi(year_str) - 1900;
+            file_time.tm_mon = atoi(month_str) - 1;
+            file_time.tm_mday = atoi(day_str);
+            
+            time_t file_time_t = mktime(&file_time);
+            if (file_time_t < oldest_time) {
+                oldest_time = file_time_t;
+                strncpy(oldest_file, entry->d_name, MAX_FILENAME_LEN - 1);  // 确保不会溢出
+            }
+        }
+    }
+    closedir(dir);
+
+    if (strlen(oldest_file) > 0) {
+        char file_path[MAX_FILEPATH_LEN];  // 修改这里
+        snprintf(file_path, MAX_FILEPATH_LEN, "/spiffs/%s", oldest_file);  // 现在安全了
+        return delete_file(file_path);
+    }
+
+    return ESP_FAIL;
+}
 
 /**
  * @brief 确保有足够的存储空间
@@ -105,10 +156,82 @@ static esp_err_t ensure_storage_space(size_t required_size)
  * 
  * @return esp_err_t 
  */
+static esp_err_t ensure_image_count_limit(void)
+{
+    size_t total_size;
+    int count = count_spiffs_images(&total_size);
+    
+    if (count < 0) {
+        ESP_LOGE(TAG, "获取图片数量失败");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "当前图片数量: %d, 限制: %d", count, MAX_IMAGES_COUNT);
+    
+    // 如果超过限制，删除最早的图片
+    while (count >= MAX_IMAGES_COUNT) {
+        ESP_LOGI(TAG, "图片数量超过限制，删除最早的图片");
+        if (delete_oldest_image() != ESP_OK) {
+            ESP_LOGE(TAG, "删除最早图片失败");
+            return ESP_FAIL;
+        }
+        count--;
+    }
+    
+    return ESP_OK;
+}
 
 /**
  * @brief 清理超过90天的图片
  */
+esp_err_t clean_expired_images(void)
+{
+    time_t now = time(NULL);
+    DIR *dir = opendir("/spiffs");
+    if (!dir) return ESP_FAIL;
+
+    esp_err_t ret = ESP_OK;
+    int deleted_count = 0, checked_count = 0;
+    struct dirent *entry;
+    
+    while ((entry = readdir(dir)) != NULL) {
+        if (strstr(entry->d_name, ".jpg")) {
+            checked_count++;
+            
+            struct tm file_time = {0};
+            char year_str[5] = {0}, month_str[3] = {0}, day_str[3] = {0};
+            
+            strncpy(year_str, entry->d_name, 4);
+            strncpy(month_str, entry->d_name + 4, 2);
+            strncpy(day_str, entry->d_name + 6, 2);
+            
+            file_time.tm_year = atoi(year_str) - 1900;
+            file_time.tm_mon = atoi(month_str) - 1;
+            file_time.tm_mday = atoi(day_str);
+            
+            double diff_days = difftime(now, mktime(&file_time)) / (24 * 3600);
+            
+            if (diff_days > MAX_IMAGE_DAYS) {
+                char file_path[MAX_FILEPATH_LEN];
+                snprintf(file_path, MAX_FILEPATH_LEN, "/spiffs/%s", entry->d_name);
+                if (delete_file(file_path) == ESP_OK) {
+                    deleted_count++;
+                    ESP_LOGI(TAG, "删除过期图片(%.1f天): %s", diff_days, entry->d_name);
+                } else {
+                    ret = ESP_FAIL;
+                }
+            }
+        }
+    }
+    
+    closedir(dir);
+    check_storage_space();
+    
+    ESP_LOGI(TAG, "Cleanup completed - Checked: %d, Deleted: %d files", 
+             checked_count, deleted_count);
+             
+    return ret;
+}
 
 void init_temp_storage(void)
 {
