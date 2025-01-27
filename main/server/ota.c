@@ -38,12 +38,20 @@ extern QueueHandle_t voice_evt_queue;
  * 
  * @return OTA_STATUS 当前OTA状态枚举值
  */
+OTA_STATUS get_ota_status()
+{
+    return ota_status; 
+}
 
 /**
  * @brief 设置OTA状态
  * 
  * @param set_ota_status 要设置的OTA状态
  */
+void set_ota_status(OTA_STATUS set_ota_status)
+{
+    ota_status = set_ota_status;
+}
 
 /**
  * @brief 获取当前运行的固件版本
