@@ -32,6 +32,15 @@ const static char* TAG = "VOICE"; /**< 日志标签 */
  * @param group_size 命令组大小（字节数）
  * @return bool 如果命令在组中返回true，否则返回false
  */
+static bool is_cmd_in_group(uint8_t cmd, const uint8_t* cmd_group, uint8_t group_size)
+{
+    for (uint8_t i = 0; i < group_size; i++) {
+        if (cmd == cmd_group[i]) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /**
  * @brief WT588F芯片2线制通信函数
@@ -106,6 +115,103 @@ const static char* TAG = "VOICE"; /**< 日志标签 */
  * 
  * @param arg 任务参数（未使用）
  */
+static void voice_task(void* arg)
+{
+    uint8_t cmd;
+    
+    // 重新定义命令类型分组，HEATING单独处理
+    const uint8_t TRAINING_START_CMDS[] = {COLOR_LIGHT, FEED_LIGHT};  // 移除HEATING
+    const uint8_t TRAINING_END_CMDS[] = {FEEDTRAIN_END, COLORTRAIN_END, HEATING_END};
+    const uint8_t COUNTDOWN_CMDS[] = {COUNT_DOWN_1, COUNT_DOWN_2, COUNT_DOWN_3, COUNT_DOWN_4, COUNT_DOWN_5};
+    const uint8_t REMIND_CMDS[] = {OPEN_EYES, WEAR_REMIND};
+    const uint8_t OTA_CMDS[] = {OTA_START, OTA_SUCCESS, OTA_FAIL};
+    // 定义需要停止背景音乐的命令
+    const uint8_t STOP_BGM_CMDS[] = {WELCOME, OTA_START, OTA_SUCCESS, OTA_FAIL, FEEDTRAIN_END, COLORTRAIN_END, HEATING_END};
+    
+    while(true) {
+        if(xQueueReceive(voice_evt_queue, &cmd, portMAX_DELAY)) {
+            WELCOME_flag = true;
+            
+#if DEBUG_
+            ESP_LOGI(TAG, "调用语音指令：0x%x", cmd);
+#endif
+            
+            // 只对特定命令停止背景音乐，避免重复启动
+            if(is_cmd_in_group(cmd, STOP_BGM_CMDS, sizeof(STOP_BGM_CMDS))) {
+                stop_background_music();
+                vTaskDelay(100 / portTICK_PERIOD_MS); // 延时确保停止命令生效
+            }
+            
+            // 在播放语音命令前，先确保停止当前播放状态
+            // 这样避免语音命令与背景音乐命令冲突
+            if(cmd != STOP) {
+                Line_2A_WT588F(0xFE); // 先停止当前播放
+                esp_rom_delay_us(2000); // 等待停止命令生效
+                // WT588F芯片停止命令可能重置音量，需要重新设置
+                update_volume();
+                esp_rom_delay_us(1000); // 等待音量设置生效
+            }
+            
+            // 播放指定命令
+            Line_2A_WT588F(cmd);
+            
+            // 添加调试日志
+            ESP_LOGI(TAG, "播放命令: 0x%x, training_flag=%d, feed_status=%d, key_status=%d", 
+                     cmd, training_flag, feed_set_status(), key_get_status());
+            
+            // 特殊情况：在非训练状态下收到提醒命令，立即停止播放
+            if(feed_set_status() == FEED_NONE && 
+               is_cmd_in_group(cmd, REMIND_CMDS, sizeof(REMIND_CMDS))) {
+                ESP_LOGI(TAG, "非训练状态下的提醒命令，停止播放");
+                Line_2A_WT588F(0xFE); 
+            }
+            
+            // 根据命令类型执行相应操作
+            if(cmd == WELCOME) {
+                // 欢迎语音，延时较长
+                vTaskDelay(3500 / portTICK_PERIOD_MS);
+                // 播放完成后停止，避免重复播放
+                Line_2A_WT588F(0xFE);
+            } 
+            else if(is_cmd_in_group(cmd, TRAINING_START_CMDS, sizeof(TRAINING_START_CMDS))) {
+                // 训练开始类命令（COLOR_LIGHT, FEED_1）
+                training_flag = true; // 设置训练标志
+                handle_voice_music_recovery(cmd, 1200); // 使用统一的恢复逻辑
+            }
+            else if(cmd == HEATING) {
+                // 加热命令单独处理
+                training_flag = true; // 设置训练标志
+                handle_voice_music_recovery(cmd, 1200); // 使用统一的恢复逻辑
+            }
+            else if(cmd == DISABLE_HEAT) {
+                // 关闭加热，不影响训练状态
+                handle_voice_music_recovery(cmd, 2500); // 使用统一的恢复逻辑
+            } 
+            else if(is_cmd_in_group(cmd, TRAINING_END_CMDS, sizeof(TRAINING_END_CMDS))) {
+                // 训练结束类命令
+                training_flag = false;
+                vTaskDelay(2500 / portTICK_PERIOD_MS);
+                Line_2A_WT588F(0xFE); // 停止播放
+            } 
+            else if(is_cmd_in_group(cmd, COUNTDOWN_CMDS, sizeof(COUNTDOWN_CMDS))) {
+                // 倒计时命令，在训练模式下需要恢复音乐
+                handle_voice_music_recovery(cmd, 2000); // 使用统一的恢复逻辑
+            } 
+            else if(is_cmd_in_group(cmd, REMIND_CMDS, sizeof(REMIND_CMDS))) {
+                // 提醒命令，在训练模式下需要恢复音乐
+                ESP_LOGI(TAG, "REMIND命令处理: cmd=0x%x, feed_status=%d", cmd, feed_set_status());
+                handle_voice_music_recovery(cmd, 2400); // 使用统一的恢复逻辑
+            } 
+            else {
+                // 其他命令，播放完成后使用统一的音乐恢复逻辑
+                handle_voice_music_recovery(cmd, 2500); // 使用统一的恢复逻辑
+            }
+
+            // 让出一次调度，避免长时间占用CPU触发WDT
+            vTaskDelay(1);
+        }
+    }
+}
 
 /**
  * @brief 语音模块测试功能
