@@ -49,6 +49,37 @@ static bool is_cmd_in_group(uint8_t cmd, const uint8_t* cmd_group, uint8_t group
  * 
  * @param data 要发送的命令字节
  */
+static void Line_2A_WT588F(uint8_t data)
+{
+    uint8_t b_data;
+    b_data = data & 0x01; // 获取待发送数据的最低位
+
+    // 数据发送完成之后恢复高电平
+    gpio_set_level(IO_CLK, 1);
+    gpio_set_level(IO_DATA, 1);
+
+    // 时钟线拉低，延时5ms
+    gpio_set_level(IO_CLK, 0);
+    esp_rom_delay_us(5000);
+
+    // 进入数据发送的循环中
+    for (int i = 0; i < 8; i++)
+    {
+        gpio_set_level(IO_CLK, 0); // 时钟线拉低
+        gpio_set_level(IO_DATA, b_data);
+        esp_rom_delay_us(1000);
+
+        gpio_set_level(IO_CLK, 1);
+        esp_rom_delay_us(1000);
+
+        data = data >> 1;     // data右移1位，相当于删除原本最低位的数据
+        b_data = data & 0x01; // 取处理后data的最后一位
+    }
+
+    // 数据发送完成之后恢复高电平
+    gpio_set_level(IO_CLK, 1);
+    gpio_set_level(IO_DATA, 1);
+}
 
 /**
  * @brief 循环播放当前背景音乐
@@ -81,6 +112,35 @@ static bool is_cmd_in_group(uint8_t cmd, const uint8_t* cmd_group, uint8_t group
  * 根据存储的音量参数设置WT588F芯片音量
  * 音量范围：1-5级
  */
+void update_volume(void)
+{
+    int volume = 1; // 默认音量值
+
+    volume = get_device_para(DEVICE_PARA_VOL);
+    uint8_t command = VOLUME_LEVEL_0;
+    switch(volume) {
+        case 1:
+            command = VOLUME_LEVEL_1;
+            break;
+        case 2:
+            command = VOLUME_LEVEL_2;
+            break;
+        case 3:
+            command = VOLUME_LEVEL_3;
+            break;
+        case 4:
+            command = VOLUME_LEVEL_4;
+            break;
+        case 5:
+            command = VOLUME_LEVEL_5;
+            break;
+        default:
+            ESP_LOGE(TAG, "音量设置超出限制");
+            break;
+    }
+    Line_2A_WT588F(command); 
+    ESP_LOGI(TAG, "已经更新音量到 %d", volume);
+}
 
 /**
  * @brief 控制语音芯片电源
@@ -95,6 +155,10 @@ static bool is_cmd_in_group(uint8_t cmd, const uint8_t* cmd_group, uint8_t group
  * 
  * @param command 要播放的语音命令码
  */
+void play_voice(uint8_t command)
+{
+    xQueueSend(voice_evt_queue, &command, 0);
+}
 
 /**
  * @brief 停止当前语音播放
@@ -224,3 +288,44 @@ static void voice_task(void* arg)
  * 
  * 配置IO、创建任务和队列、设置初始音量
  */
+void voice_init(void)
+{
+    gpio_config_t io_conf = {
+#if BUM_MODE
+        .pin_bit_mask = (1ULL << IO_CLK) | (1ULL << IO_DATA) | (1ULL << IO_BUSY) | (1ULL << IO_FREE),
+#else
+        .pin_bit_mask = (1ULL << IO_CLK) | (1ULL << IO_DATA),
+#endif
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+
+#if !BUM_MODE
+    // 音频芯片电源使能IO
+    Xl9535_Set_Io_Direction(PIN_P07, IO_OUTPUT);
+    Xl9535_Set_Io_Status(PIN_P07, IO_HIGH);
+    
+    // 时钟线和数据线默认高电平
+    gpio_set_level(IO_CLK, 1);
+    gpio_set_level(IO_DATA, 1);
+    
+    // 初始化音量大小
+    update_volume();
+    // 创建voice相关的消息队列
+    voice_evt_queue = xQueueCreate(15, sizeof(uint8_t));
+    // 创建任务
+    xTaskCreate(voice_task, "voice_task", 4096, NULL, PRIORITY_VOICE_TASK, NULL);
+    
+    ESP_LOGI(TAG, "语音模块初始化完成");
+    
+    // 可选择在初始化后关闭电源以节省功耗
+    // 取消注释下面的代码行来启用电源管理模式
+    // voice_power_control(false);
+    
+    // 进行模块测试（可选）
+    // test_voice_module();
+#endif
+}
