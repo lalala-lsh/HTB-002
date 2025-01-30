@@ -97,6 +97,15 @@ static void Line_2A_WT588F(uint8_t data)
 /**
  * @brief 强制停止背景音乐
  */
+void stop_background_music(void)
+{
+    Line_2A_WT588F(0xFE);
+    esp_rom_delay_us(2000); // 等待停止命令生效
+    // WT588F芯片停止命令可能重置音量，需要重新设置
+    update_volume();
+    bgm_playing = false;
+    ESP_LOGI(TAG, "强制停止背景音乐，已重新设置音量");
+}
 
 /**
  * @brief 统一处理语音播放后的音乐恢复逻辑
