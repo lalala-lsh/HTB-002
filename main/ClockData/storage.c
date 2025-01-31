@@ -459,7 +459,67 @@ void get_SNCode()
 }
 
 // 获取 i32 类型的数据
+static esp_err_t get_i32_value_from_nvs(char* space_name, char *key, int32_t *result)
+{
+    // 检查空指针
+    if (!space_name || !key || !result) {
+        ESP_LOGE("NVS", "get_i32_value: Invalid arguments passed to get_i32_value_from_nvs.");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    nvs_handle_t my_handle;
 
+    // 打开对应的分区
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, space_name, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        goto lab_err_return;
+    }
+
+    // 获取对应的键值对数据
+    err = nvs_get_i32(my_handle, key, result); 
+    if(err != ESP_OK){
+        goto lab_err_return;
+    }
+
+    nvs_close(my_handle);
+    return ESP_OK;
+
+    // 打开分区失败、读取失败的情况下返回错误
+lab_err_return:
+    nvs_close(my_handle);
+    return err;
+}
+
+static esp_err_t set_i32_value_to_nvs(char* space_name, char *key, int data)
+{
+    // 检查空指针
+    if (!space_name || !key) {
+        ESP_LOGE("NVS", "set_i32_value: Invalid arguments passed to set_i32_value_to_nvs.");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    nvs_handle_t my_handle;
+
+    // 打开对应的分区
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, space_name, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        goto lab_err_return;
+    }
+
+    // 设置键值对数据
+    err = nvs_set_i32(my_handle, key, data); 
+    if(err != ESP_OK){
+        goto lab_err_return;
+    }
+
+    nvs_close(my_handle);
+    return ESP_OK;
+
+// 打开分区失败、读取失败的情况下返回错误
+lab_err_return:
+    nvs_close(my_handle);
+    return err;
+}
 
 /** 
  * \brief 函数用于同步 NVS 数据和全局变量数据
@@ -468,6 +528,31 @@ void get_SNCode()
  * 
  * - NVS 中存在相关键值对，将读出数据设置到全局变量中
  **/
+static void nvs_value_init(char* space_name, char *key, int initial_data, int *actual_data)
+{
+    int32_t storing_data = -1;
+    esp_err_t err = get_i32_value_from_nvs(space_name, key, &storing_data);
+
+    switch(err){
+        case ESP_OK:
+            ESP_LOGI("NVS", "nvs_value_init %s: 曾初始化", key);
+            *actual_data = storing_data;
+            break;
+        case ESP_ERR_NVS_NOT_FOUND:
+            ESP_LOGI("NVS", "nvs_value_init %s: 开始执行初始化", key);
+            err = set_i32_value_to_nvs(space_name, key, initial_data);
+            if(err == ESP_OK){
+                ESP_LOGI("NVS", "nvs_value_init: 初始化成功");
+            }else{
+                ESP_LOGE("NVS", "nvs_value_init: 初始化失败(%s)", esp_err_to_name(err));
+            }
+            *actual_data = initial_data; // 无论是否成功存入 Flash，都将实际值设置为默认值
+            break;
+        default:
+            ESP_LOGE("NVS", "nvs_value_init: Error (%s) reading NVS handle", esp_err_to_name(err));
+            break;
+    }
+}
 
 /** 
  * \brief 设置参数功能，包括写入和读出测试两个部分
@@ -475,12 +560,78 @@ void get_SNCode()
  * \param data：设置值
  * @return esp_err_t 
  **/
+esp_err_t set_device_parameters(int index_key_device_parameters, int data)
+{
+     // udp_ip 和 picture 不存储到 NVS
+    if (index_key_device_parameters == DEVICE_PARA_UDP_IP || index_key_device_parameters == DEVICE_PARA_PICTURE) {
+        return ESP_FAIL;
+    }
+
+    // 先设置参数
+    esp_err_t err = set_i32_value_to_nvs(
+        PROJECT_STORAGE_PARTITION, 
+        key_device_parameters[index_key_device_parameters],
+        data
+    );
+
+            // 参数设置成功的情况下读出参数
+        if(err == ESP_OK){
+            int32_t value = -1;
+
+        esp_err_t err = get_i32_value_from_nvs(
+            PROJECT_STORAGE_PARTITION, 
+            key_device_parameters[index_key_device_parameters],
+            &value
+        );
+
+        // 还有一种情况是 读出的参数 与 设置的参数 和当前的参数都不一致 我就需要重新设置参数
+
+        if(err == ESP_OK){
+            if(value == data){ // 判断读出的参数与设置的参数是否一致
+                // 计算实际数组索引，跳过UDP IP和picture参数
+                int array_index = index_key_device_parameters;
+                if (index_key_device_parameters > DEVICE_PARA_UDP_IP) {
+                    array_index--;  // 跳过UDP IP (索引8)
+                    if (index_key_device_parameters > DEVICE_PARA_PICTURE) {
+                        array_index--;  // 跳过picture (索引9)
+                    }
+                }
+                actualData_device_parameters[array_index] = value;
+            }else{ // 即便读出成功但是参数不一致依旧返回错误
+                err = ESP_FAIL;
+            }
+        }
+    }
+
+    return err;
+}
 /** 
  * \brief 获取设备的参数
  * 
  * 返回设备参数给到各个模块进行配置
  * 
  **/
+int get_device_para(int para)
+{
+    if (para >= DEVICE_PARA_MAX) {
+        return -1;
+    }
+    // 跳过UDP IP和picture参数
+    if(para == DEVICE_PARA_UDP_IP || para == DEVICE_PARA_PICTURE) {
+        return -1;  // 这些参数不是整数类型
+    }
+    
+    // 计算实际数组索引，跳过UDP IP和picture参数
+    int array_index = para;
+    if (para > DEVICE_PARA_UDP_IP) {
+        array_index--;  // 跳过UDP IP (索引8)
+        if (para > DEVICE_PARA_PICTURE) {
+            array_index--;  // 跳过picture (索引9)
+        }
+    }
+    
+    return actualData_device_parameters[array_index];
+}
 
 /** 
  * \brief 设备参数初始化（遍历所有设备参数实现）
@@ -494,6 +645,40 @@ void get_SNCode()
  * - 调用相关函数使全局变量设置生效
  * 
  **/
+void func_device_parameters_init(void)
+{
+    int array_index = 0;  // 数组中的实际索引
+    for(int i=0; i<DEVICE_PARA_MAX; i++){  
+        if(i==DEVICE_PARA_UDP_IP || i==DEVICE_PARA_PICTURE)
+        {
+            continue;  // 跳过UDP IP和picture参数
+        }else{
+            nvs_value_init(
+                        PROJECT_STORAGE_PARTITION, 
+                        key_device_parameters[i], 
+                        initialData_device_parameters[array_index], 
+                        &actualData_device_parameters[array_index]);
+            array_index++;  // 只有在实际存储时才增加数组索引
+        }
+           
+    }
+
+    update_feed_duty();
+    update_volume();
+    //linjun
+    update_feed_time();
+    update_color_time();
+    update_heating_time();
+    update_camera_status();
+    update_beep_status();
+#if 0
+    for(int i=0; i<DEVICE_PARA_40HZ + 1; i++)
+    {
+        printf("%s的值：%d\n", key_device_parameters[i], actualData_device_parameters[i]);
+    }
+    printf("--------------------------------\n");
+#endif
+}
 
 
 
