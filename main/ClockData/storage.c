@@ -680,6 +680,46 @@ void func_device_parameters_init(void)
 #endif
 }
 
+void clear_device_parameters(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+
+    // 打开 NVS 句柄
+    err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, PARA_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Error opening NVS handle");
+        return;
+    }
+
+    // 清除所有设备参数
+    int array_index = 0;
+    for(int i = 0; i < DEVICE_PARA_MAX; i++) {
+        if(i == DEVICE_PARA_UDP_IP || i == DEVICE_PARA_PICTURE)
+        {
+            continue;  // 跳过UDP IP和picture参数
+        }else{
+            err = nvs_set_i32(my_handle, key_device_parameters[i], initialData_device_parameters[array_index]);
+            if (err != ESP_OK) {
+                ESP_LOGE("STORAGE", "Error resetting parameter %s", key_device_parameters[i]);
+            }
+            array_index++;
+        }
+        
+    }
+
+    // 提交更改
+    err = nvs_commit(my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Error committing NVS changes");
+    }
+
+    // 关闭句柄
+    nvs_close(my_handle);
+
+    // 重置实际参数数组
+    memcpy(actualData_device_parameters, initialData_device_parameters, sizeof(actualData_device_parameters));
+}
 
 
 
