@@ -206,6 +206,66 @@ void build_heartbeat(esp_mqtt_client_handle_t client){
 	}
 }
 
+void build_feedreport(esp_mqtt_client_handle_t client, int level, int start_tm, int end_tm, int work_tm, int rcg_code, uint8_t tcount, uint8_t ccount, uint8_t ecount, uint8_t is_heat){
+	if (client != NULL)
+	{
+		// 存储RCG_CODE用于后续图片上传
+		pending_rcg_code = rcg_code;
+		char * levelstr = NULL;
+		switch(level) 
+		{
+			case 0x01:
+				levelstr = "Feeding";
+				break;
+			case 0x02:
+				levelstr = "Amblyopia";
+				break;
+			case 0x03:
+				levelstr = "Heat";//加热模式
+				break;
+			default:
+				levelstr = "ERROR01";
+				break; 
+		}
+
+		char rid[30];
+		time_t rawtime;
+		uint64_t current_time_ms = esp_timer_get_time()/1000;
+		int ms_pre = current_time_ms%1000;
+		snprintf(rid, 30, "%s%ld%d", c_user_data, (long)time(&rawtime), ms_pre);
+
+		cJSON *root = NULL;
+
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "CMD", CMD_FEEDREPORT);
+		cJSON_AddStringToObject(root, "VERSION", device_version);
+		cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+		cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+		cJSON_AddStringToObject(root, "DEVICE_MODE", levelstr);
+
+		cJSON_AddNumberToObject(root, "DEVICE_START_TIME", start_tm);
+		cJSON_AddNumberToObject(root, "DEVICE_END_TIME", end_tm);
+		cJSON_AddNumberToObject(root, "DEVICE_WORK_TIME", work_tm);
+        cJSON_AddNumberToObject(root, "RCG_CODE", rcg_code);
+		cJSON_AddNumberToObject(root, "RCG_TCOUNT", tcount);  //总识别
+		cJSON_AddNumberToObject(root, "RCG_CCOUNT", ccount);  //闭眼次数
+		cJSON_AddNumberToObject(root, "RCG_ECOUNT", ecount);  //异常次数
+		cJSON_AddNumberToObject(root, "IS_HEAT", is_heat);    //是否加热
+		// cJSON_AddNumberToObject(root, "feeding_heat", get_device_para(DEVICE_PARA_FEEDING_HEAT));  //红光加热开关配置
+
+		cJSON_AddStringToObject(root, "RID", rid);
+
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root);
+		int msg_id;
+		(void)msg_id;
+		ESP_LOGI(TAG, "feedreport JSON: %s", String);  //打印完整JSON
+		msg_id = esp_mqtt_client_publish(client, push_topic, String, strlen(String), 1, 0);
+		ESP_LOGI(TAG, "sent publish successful, report msg:%s, msg_id=%d", levelstr, msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+	}
+}
 //是否需要该函数，用于上传当前训练状态--linjun
 
 

@@ -487,6 +487,45 @@ static void feed_task(void* arg)
 // 处理彩光完成
 
 // 网络上报或本地存储数据
+static void report_or_store_data(int level, time_t start_time, time_t end_time, uint32_t time_count,
+                                int day, uint8_t t_count, uint8_t c_count, uint8_t ecount, uint8_t record_type, uint32_t rcg_code) {
+    // 放宽保存条件：只要时间有效就保存，不再强制要求RTCTimeSet_flag
+    // 这样即使RTC硬件损坏，只要SNTP同步过或有NVS备份时间，就可以保存数据
+    if (!is_time_valid()) {
+        ESP_LOGW(TAG, "时间无效，使用降级时间策略继续保存训练数据");
+    }
+
+    // 检查时间戳是否合理（2024年之后）
+    time_t sys_time = time(NULL);
+    if (sys_time < 1704067200) {  // 2024-01-01 00:00:00 UTC
+        ESP_LOGW(TAG, "系统时间戳过小 (%ld)，继续保存训练数据（降级）", (long)sys_time);
+    }
+
+    ESP_LOGI(TAG, "时间有效，系统时间戳: %ld，开始保存训练数据", (long)sys_time);
+    
+    // 使用传入的rcg_code，不再重新生成
+    
+    // 如果是哺光训练（有图片识别），先保存图片到SPIFFS
+    if (level == 0x01) {  // 哺光训练
+        // 先结束训练会话，将临时图片保存到SPIFFS
+        end_training_session();
+        ESP_LOGI(TAG, "哺光训练结束，图片已保存到SPIFFS，RCG_CODE: %lu", rcg_code);
+    }
+    
+    if (get_wifi_status() == WIFI_STATE_CONNECTED && get_mqtt_status() == MQTT_EVENT_CONNECTED_) {
+        ESP_LOGI(TAG, "report to mqtt, level:%d, st:%lld, et:%lld, rcg_code:%lu", level, start_time, end_time, rcg_code);
+
+        // 使用训练开始时记录的加热状态
+        build_feedreport(get_mqtt_client(), level, start_time, end_time, time_count, rcg_code, t_count, c_count, ecount, training_heat_status);
+
+        // 注意：图片上传已改为等待CMD:103回复后再执行
+        ESP_LOGI(TAG, "训练记录已发送，等待服务器回复后再上传图片");
+    } else {
+        // 使用训练开始时记录的加热状态，写本地flash
+        store_record(level, start_time, end_time, time_count, rcg_code, day, t_count, c_count, ecount, training_heat_status, record_type);
+        ESP_LOGI(TAG, "generate record & store to flash, rcg_code: %lu", rcg_code);
+    }
+}
 
 // 添加灯光控制的辅助函数
 static void set_pins_status(const snPinName_t* pins, int length, uint8_t status) {

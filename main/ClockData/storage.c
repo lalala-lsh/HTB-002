@@ -113,6 +113,59 @@ update_nvs_para_day
 该函数应用时要注意，这里的day输入必须是实际日期的比如1号开始，比如1号、31号，
 在应用过程中如果是在按位存储中要注意，按位存储是从0位开始表示1号，则不能输入0要表示1号，而应该+1
 */
+static void update_nvs_para_day(int day, RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;  
+    int32_t para_value;
+    char* partition = NULL;
+
+    switch (type) {
+        case RECORD_FD:
+        partition = FD_STORAGE_PARTITION;
+        break;
+        case RECORD_RS:
+        partition = RS_STORAGE_PARTITION;
+        break;
+        default:
+        return;
+    }
+
+    // printf("enter update_nvs_para_day\n");
+
+    err = nvs_open_from_partition(partition, PARA_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("NVS", "ERROR...update_nvs_para_day..open_from_partition!!!");
+    } else {
+        ESP_LOGI("NVS", "opening NVS handle Done");
+        // Read
+        ESP_LOGI("NVS", "Get PARA_DAYKEY from NVS ... ");
+        //先获取当前参数区数值
+        err = nvs_get_i32(my_handle, PARA_DAYKEY, &para_value); 
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_get_i32 PARA_DAYKEY Done");} 
+            else {ESP_LOGE("STORAGE", "nvs_get_i32 PARA_DAYKEY Failed!");}
+        //把新增要存储的数据更新到参数区中，用异或运算
+        //每天对应一个位
+        if (day == 0) {   //当day为0时，表示把所有天数的记录都清掉
+            err = nvs_set_i32(my_handle, PARA_DAYKEY, 0); 
+            if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_set_i32 PARA_DAYKEY 0 Done");} 
+                else { ESP_LOGE("STORAGE", "nvs_set_i32 PARA_DAYKEY 0 Failed!"); }
+        } else {
+            //int32_t temp = (1 << (day - 1));//存储位从0开始，day从1开始，所以需要注意这点
+            int32_t temp = (1 << day);//存储位改成从1开始，day从1开始，所以需要注意这点
+            ESP_LOGI("STORAGE", "old para_value = %lx, temp = %lx", para_value, temp);
+            para_value = (para_value | temp);
+            ESP_LOGI("STORAGE", "day = %d, new para_value = %lx",day, para_value);
+            err = nvs_set_i32(my_handle, PARA_DAYKEY, para_value); 
+            if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_set_i32 PARA_DAYKEY Done");} 
+                else { ESP_LOGE("STORAGE", "nvs_set_i32 PARA_DAYKEY Failed!"); }
+        }
+        err = nvs_commit(my_handle);
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done");} 
+            else { ESP_LOGE("STORAGE", "nvs_commit Failed!"); }
+    }
+    nvs_close(my_handle);
+}
 
 
 /*
@@ -123,6 +176,97 @@ update_nvs_para_day
 
 
 
+static void write_nvs_recorddata(int day, char *data, RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    int32_t datanums = 0;
+    int32_t datastoredest = 0;  //数据要存储的具体位置
+    char datakeyname[32] = "0";
+    char spacename[32] = "0";
+    char* partition = NULL;
+
+    // 1. 参数检查
+    if (day < 0 || day > 31 || data == NULL) {
+        ESP_LOGE("STORAGE", "Invalid parameters: day=%d, data=%p", day, data);
+        return;
+    }
+
+    // 2. 确定分区
+    switch (type) {
+        case RECORD_FD:
+            partition = FD_STORAGE_PARTITION;
+            break;
+        case RECORD_RS:
+            partition = RS_STORAGE_PARTITION;
+            break;
+        default:
+            ESP_LOGE("STORAGE", "Invalid record type");
+            return;
+    }
+
+    // 3. 构建空间名称 (每天一个独立空间)
+    strcpy(spacename, s_spacename_data);
+    strcat(spacename, s_num[day]);
+    ESP_LOGI("STORAGE", "Storing data to space: %s", spacename);
+
+    // 4. 打开NVS句柄
+    err = nvs_open_from_partition(partition, spacename, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Failed to open NVS partition: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // 5. 获取当前存储的记录数
+    err = nvs_get_i32(my_handle, DATA_NUMS, &datanums);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        // 如果是新的一天，初始化记录数为0
+        datanums = 0;
+        ESP_LOGI("STORAGE", "New day, initializing record count");
+    } else if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Failed to read record count: %s", esp_err_to_name(err));
+        nvs_close(my_handle);
+        return;
+    }
+
+    // 6. 检查记录数限制
+    if (datanums >= 10) {
+        ESP_LOGW("STORAGE", "Maximum records reached for day %d", day);
+        nvs_close(my_handle);
+        return;  // 达到最大记录数，不再存储
+    }
+
+    // 7. 存储新记录
+    datastoredest = datanums;  // 新记录存储在当前记录数位置
+    strcpy(datakeyname, s_data_name);
+    strcat(datakeyname, s_num[datastoredest]);
+    
+    err = nvs_set_str(my_handle, datakeyname, data);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Failed to store record: %s", esp_err_to_name(err));
+        nvs_close(my_handle);
+        return;
+    }
+
+    // 8. 更新记录数
+    datanums++;
+    err = nvs_set_i32(my_handle, DATA_NUMS, datanums);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Failed to update record count: %s", esp_err_to_name(err));
+        nvs_close(my_handle);
+        return;
+    }
+
+    // 9. 提交更改
+    err = nvs_commit(my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "Failed to commit changes: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI("STORAGE", "Successfully stored record %ld for day %d", datastoredest + 1, day);
+    }
+
+    nvs_close(my_handle);
+}
 /*存储数据存储的是以下几项，其他的读出后在外面进行拼接后上报
 输入参数：
 level：对应的按键的功能，拼凑在"DEVICE_MODE"字段
@@ -139,6 +283,56 @@ DEVICE_START_TIME
 DEVICE_END_TIME
 DEVICE_WORK_TIME
 */
+void store_record(int level, int start_tm, int end_tm, int work_tm, int rcg_code, int day, uint8_t tcount, uint8_t ccount, uint8_t ecount, uint8_t is_heat, RECORD_TYPE_E type)
+{
+	char * levelstr = NULL;
+    // int daypara = day;
+		switch(level)
+		{
+			case 0x01:
+				levelstr = "Feeding";//linjun
+				break;
+			case 0x02:
+				levelstr = "Amblyopia";//linjun
+				break;
+			case 0x03:
+				levelstr = "Heat";//加热模式
+				break;
+			default:
+				levelstr = "ERROR01";
+				break;
+		}
+
+		cJSON *root = NULL;
+
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "CMD", CMD_FEEDREPORT);
+		cJSON_AddStringToObject(root, "DEVICE_MODE", levelstr);
+
+		cJSON_AddNumberToObject(root, "DEVICE_START_TIME", start_tm);
+		cJSON_AddNumberToObject(root, "DEVICE_END_TIME", end_tm);
+		cJSON_AddNumberToObject(root, "DEVICE_WORK_TIME", work_tm);
+        cJSON_AddNumberToObject(root, "RCG_CODE", rcg_code);
+        cJSON_AddNumberToObject(root, "RCG_TCOUNT", tcount);
+        cJSON_AddNumberToObject(root, "RCG_CCOUNT", ccount);
+        cJSON_AddNumberToObject(root, "RCG_ECOUNT", ecount);
+        cJSON_AddNumberToObject(root, "IS_HEAT", is_heat);  //是否加热
+        // cJSON_AddNumberToObject(root, "feeding_heat", get_device_para(DEVICE_PARA_FEEDING_HEAT));  //红光加热开关配置
+
+
+		// cJSON_AddStringToObject(root, "RID", rid);
+
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root);   //生成的使用记录数据
+
+        ESP_LOGI("STORAGE", "generate_feedrecord, sizeof(String) = %d, report msg:%s", strlen(String), String);
+       
+        write_nvs_recorddata(day, String, type);
+        update_nvs_para_day(day, type);
+
+		cJSON_free(String);
+		cJSON_Delete(root);
+}
 
 
 
@@ -238,7 +432,15 @@ void record_nvs_module_init(void)
 
 static UsageRecords_t arrUsageRecords[30][10];
 
+UsageRecords_t* getusagerecord(void)
+{
+    return &arrUsageRecords[0][0];
+}
 
+uint16_t* getusagerecordcounts(void)
+{
+    return 0;
+}
 /*
 获取设备是否被激活的标示,在红光、彩光功能开启之前调用
 */
