@@ -107,6 +107,47 @@ clear_nvs_para_day
 该函数应用时要注意，这里的day输入必须是实际日期的比如1号开始，比如1号、31号，
 在应用过程中如果是在按位存储中要注意，按位存储是从0位开始表示1号，则不能输入0要表示1号，而应该+1
 */
+void clear_nvs_para_day(int day, RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;  
+    int32_t para_value;
+    char* partition = NULL;
+
+    switch (type) {
+        case RECORD_FD:
+        partition = FD_STORAGE_PARTITION;
+        break;
+        case RECORD_RS:
+        partition = RS_STORAGE_PARTITION;
+        break;
+        default:
+        return;
+    }
+
+    ESP_LOGI("STORAGE", "clear_nvs_para_day()函数执行");      
+    err = nvs_open_from_partition(partition, PARA_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "ERROR...update_nvs_para_day..open_from_partition!!!");
+    } else {
+        //int32_t temp = ~(1 << (day - 1));//存储位从0开始，day从1开始，所以需要注意这点
+        int32_t temp = ~(1 << day);//存储位改成从1开始，day从1开始，所以需要注意这点
+        err = nvs_get_i32(my_handle, PARA_DAYKEY, &para_value); 
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_get_i32 PARA_DAYKEY Done");} 
+            else {ESP_LOGE("STORAGE", "nvs_get_i32 PARA_DAYKEY Failed!");}
+        ESP_LOGI("STORAGE", "old para_value = %lx, temp = %lx", para_value, temp);
+        para_value = (para_value & temp);
+        ESP_LOGI("STORAGE", "day = %d, new para_value = %lx\n",day, para_value);
+        err = nvs_set_i32(my_handle, PARA_DAYKEY, para_value); 
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_set_i32 PARA_DAYKEY Done");} 
+            else {ESP_LOGE("STORAGE", "nvs_set_i32 PARA_DAYKEY Failed!");}
+        err = nvs_commit(my_handle);
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done");} 
+            else {ESP_LOGE("STORAGE", "nvs_commit Failed!");}
+    }
+	ESP_LOGI("STORAGE", "clear_nvs_para_day()函数执行");  
+    nvs_close(my_handle);
+}
  
 /*
 update_nvs_para_day
@@ -172,8 +213,138 @@ static void update_nvs_para_day(int day, RECORD_TYPE_E type)
 检查存储数据
 返回:有存储数据的天数标示，比如0x0003 表示第1、2天有存储数据
 */
+int32_t check_record_data(RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;  
+    int32_t para_value;
+    char* partition = NULL;
 
+    switch (type) {
+        case RECORD_FD:
+        partition = FD_STORAGE_PARTITION;
+        break;
+        case RECORD_RS:
+        partition = RS_STORAGE_PARTITION;
+        break;
+        default:
+        return 0;
+    }
 
+    err = nvs_open_from_partition(partition, PARA_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "ERROR...check_record_data..open_from_partition!!!");
+        return 0;
+    } else {
+        ESP_LOGI("STORAGE", "opening NVS handle Done1");
+        // Read
+        ESP_LOGI("STORAGE", "Get PARA_DAYKEY from NVS ... ");
+        // 先获取当前参数区数值
+        err = nvs_get_i32(my_handle, PARA_DAYKEY, &para_value); 
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_get_i32 PARA_DAYKEY Done");} 
+            else { ESP_LOGE("STORAGE", "nvs_get_i32 PARA_DAYKEY Failed!"); }
+        if (para_value != 0) {
+            ESP_LOGI("STORAGE", "para_value = %lx", para_value);
+        }
+
+        err = nvs_commit(my_handle);
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done");} 
+            else { ESP_LOGE("STORAGE", "nvs_commit Failed!"); }
+        nvs_close(my_handle);
+        return para_value;  //返回的参数是按具有存储数据天的标示 比如0x0003 表示第1、2天有存储数据
+    }    
+}
+
+void clear_day_record_data(int day, RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;  
+    char* partition = NULL;
+    char spacename[32] = "0";
+
+    switch (type) {
+        case RECORD_FD:
+        partition = FD_STORAGE_PARTITION;
+        break;
+        case RECORD_RS:
+        partition = RS_STORAGE_PARTITION;
+        break;
+        default:
+        return;
+    }
+
+    ESP_LOGI("STORAGE", "clear_day_record_data()函数被调用");
+    strcpy(spacename, s_spacename_data);
+    strcat(spacename, s_num[day]);
+    ESP_LOGI("STORAGE", "store_data...spacename = %s", spacename);
+
+    err = nvs_open_from_partition(partition, spacename, NVS_READWRITE, &my_handle);
+    err = nvs_set_i32(my_handle, DATA_NUMS, 0);   //清掉存储
+    if(err == ESP_OK){ ESP_LOGI("STORAGE", "space...set_nvs_i32 Done");} 
+        else { ESP_LOGE("STORAGE", "space..set_nvs_i32 Failed!"); }
+	ESP_LOGI("STORAGE", "历史数据-日期数据清除成功");
+    nvs_close(my_handle);
+}
+
+int32_t get_day_record_data(int32_t day, RECORD_TYPE_E type, char databuf[][DATA_CNTS])
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    int32_t datanums = 0;
+    char datakeyname[32] = "0";
+    char spacename[32] = "0";
+    size_t len = 0;
+    char* partition = NULL;
+
+    switch (type) {
+        case RECORD_FD:
+        partition = FD_STORAGE_PARTITION;
+        break;
+        case RECORD_RS:
+        partition = RS_STORAGE_PARTITION;
+        break;
+        default:
+        return datanums;
+    }
+    
+    // printf("enter get_day_record_data\n");
+    strcpy(spacename, s_spacename_data);
+    strcat(spacename, s_num[day]);
+    // ("datakeyname = %s\n", datakeyname);
+    ESP_LOGI("STORAGE", "store_data...spacename = %s", spacename);
+    err = nvs_open_from_partition(partition, spacename, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("STORAGE", "store_data..ERROR...nvs_open_from_partition...... !!!");
+    } else {
+        err = nvs_get_i32(my_handle, DATA_NUMS, &datanums);  //获取当前有存储的数据条数
+        ESP_LOGI("STORAGE", "datanums = %ld\n", datanums);
+        if (err != ESP_OK) {
+            ESP_LOGE("STORAGE", "ERROR...nvs_get_i32(my_handle, DATA_NUMS, &datanums)");
+        } else {
+            for(int32_t i = 0; i < datanums; i++) {
+                // printf("****get record data i = [%ld]***\n", i);
+                strcpy(datakeyname, s_data_name);
+                strcat(datakeyname, s_num[i]);
+                // printf("datakeyname = %s\n", datakeyname);
+                len = sizeof(databuf[i]);
+                err = nvs_get_str(my_handle, datakeyname, databuf[i], &len);
+                if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_get_str Done");} 
+                    else { ESP_LOGE("STORAGE", "nvs_get_str Failed!"); }
+                if(err == ESP_OK){ ESP_LOGI("STORAGE", "space...set_nvs_i32 Done");} 
+                    else { ESP_LOGE("STORAGE", "space..set_nvs_i32 Failed!"); }
+                // printf("data len = %d, databuf[%ld] = %s\n", strlen(databuf[i]),i, databuf[i]);
+
+            }           
+            err = nvs_commit(my_handle);
+            if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done"); } 
+                else { ESP_LOGE("STORAGE", "nvs_commit Failed!"); }
+        }
+    }
+    // err = nvs_set_i32(my_handle, DATA_NUMS, 0);   //清掉存储
+    // printf((err != ESP_OK) ? "space..set_nvs_i32 Failed!\n" : "space...set_nvs_i32 Done\n");
+    nvs_close(my_handle);  //2023-11-21开启
+    return datanums;
+}
 
 
 static void write_nvs_recorddata(int day, char *data, RECORD_TYPE_E type)
@@ -335,6 +506,55 @@ void store_record(int level, int start_tm, int end_tm, int work_tm, int rcg_code
 }
 
 
+static void report_data_init(RECORD_TYPE_E type)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    char spacename[32] = "0";
+    char datakeyname[32] = "0";
+    char* partition = NULL;
+
+    switch (type) {
+        case RECORD_FD:
+        partition = FD_STORAGE_PARTITION;
+        break;
+        case RECORD_RS:
+        partition = RS_STORAGE_PARTITION;
+        break;
+        default:
+        return;
+    }
+    
+    int i;
+    for (i = 1; i <= 31; i++) {
+        memset(spacename, 0, 32);
+        strcpy(spacename, s_spacename_data);
+        strcat(spacename, s_num[i]);
+        ESP_LOGI("STORAGE", "spacename = %s", spacename);
+        err = nvs_open_from_partition(partition, spacename, NVS_READWRITE, &my_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE("STORAGE", "ERROR...nvs_open_from_partition...... i = %d!!!",i);
+        } else {
+            ESP_LOGI("STORAGE", "opening NVS handle Done i = %d", i);
+            err = nvs_set_i32(my_handle, DATA_NUMS, 0);
+            if(err == ESP_OK){ ESP_LOGI("STORAGE", "space...set_nvs_i32 Done"); } 
+                else { ESP_LOGE("STORAGE", "space..set_nvs_i32 Failed!"); }
+            for (int d = 0; d < 10; d++) {
+                memset(datakeyname, 0, 32);
+                strcpy(datakeyname, s_data_name);
+                strcat(datakeyname, s_num[d]);
+                ESP_LOGI("STORAGE", "datakeyname = %s", datakeyname);
+                err = nvs_set_str(my_handle, datakeyname, s_data);
+                if(err == ESP_OK){ ESP_LOGI("STORAGE", "space...set_nvs_str Done"); } 
+                    else { ESP_LOGE("STORAGE", "space..set_nvs_str Failed!"); }
+            }
+        }
+        err = nvs_commit(my_handle);
+        if(err == ESP_OK){ ESP_LOGI("STORAGE", "nvs_commit Done"); } 
+            else { ESP_LOGE("STORAGE", "nvs_commit Failed!"); }
+        nvs_close(my_handle);
+    }    
+}
 
 static void record_nvs_partition_init(RECORD_TYPE_E type)
 {
