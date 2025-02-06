@@ -232,6 +232,22 @@ static void color_count_down_remind(int timecnt){
 /*
 * 摄像头供电控制
 */
+void camera_power_control(uint8_t en_flag)
+{
+    Xl9535_Set_Io_Direction(PIN_P11, IO_OUTPUT);
+    
+    if (en_flag) {
+        Xl9535_Set_Io_Status(PIN_P11, IO_HIGH);
+#if DEBUG_
+        ESP_LOGI(TAG, "开启摄像头供电");
+#endif
+    } else {
+        Xl9535_Set_Io_Status(PIN_P11, IO_LOW);
+#if DEBUG_
+        ESP_LOGI(TAG, "断开摄像头供电");
+#endif
+    }
+}
 
 /*
 哺光电源管脚初始化，可对红光控制进行关断
@@ -574,6 +590,30 @@ static void switch_led_color(void) {
  * \brief 更新蜂鸣器状态  linjun
  **/
 
+static void camera_task(void* arg){
+    static bool first_feed_detect = true;  // 添加静态变量跟踪第一次检测
+
+    for(;;) {
+        // 只在红光模式下进行摄像头检测
+        if (feed_status == FEED_ING) { 
+            if (first_feed_detect) {
+                first_feed_detect = false;
+            } else {
+#if DEBUG_
+                ESP_LOGI(TAG, "0. 使能解码标志位");
+#endif
+                set_decode_flag(true);
+            }
+            vTaskDelay(9 * 1000 / portTICK_PERIOD_MS); 
+        }
+        else {
+            set_decode_flag(false);
+
+            first_feed_detect = true;
+        }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
 
 void feed_ruoshi_moudle_init(void)
 {
