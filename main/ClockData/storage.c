@@ -1175,12 +1175,20 @@ static int current_date = 0;  // 格式：YYYYMMDD
  * @brief 获取剩余使用次数
  * @return 剩余次数，-1表示不限
  */
+int get_count_limit(void)
+{
+    return get_device_para(DEVICE_PARA_COUNT_LIMIT);
+}
 
 /**
  * @brief 设置剩余使用次数
  * @param count 剩余次数，-1表示不限
  * @return ESP_OK 成功，ESP_FAIL 失败
  */
+esp_err_t set_count_limit(int count)
+{
+    return set_device_parameters(DEVICE_PARA_COUNT_LIMIT, count);
+}
 
 // ============= 时间备份功能 =============
 
