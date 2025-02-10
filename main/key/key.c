@@ -289,5 +289,34 @@ static void key_interrupt_task(void *arg)
     }
 }
 
+KEY_FUNC_E key_get_status(void)
+{
+    return key_status;
+}
 
+void key_set_status(KEY_FUNC_E keyfunc)
+{
+    key_status = keyfunc;
+}
 
+void key_func_init(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = GPIO_INPUT_PIN_SEL,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .intr_type = GPIO_INTR_NEGEDGE
+    };
+    
+    gpio_config(&io_conf);
+
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));                         // create a queue to handle gpio event from isr
+    xTaskCreate(key_interrupt_task, "key_interrupt_task", 4096, NULL, PRIORITY_KEY_INTERRUPT_TASK, NULL); // start gpio task
+
+    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT); // install gpio isr service
+
+    gpio_isr_handler_add(KEY_1_INPUT_IO, gpio_isr_handler, (void *)KEY_1_INPUT_IO); // 添加中断处理函数
+    gpio_isr_handler_add(KEY_2_INPUT_IO, gpio_isr_handler, (void *)KEY_2_INPUT_IO);
+
+    double_press_judge();
+}
