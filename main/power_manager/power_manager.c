@@ -184,4 +184,28 @@ static void enter_deepsleep(void)
     esp_deep_sleep_start();
 }
 
+static void deepsleep_task(void* arg)
+{   
+    for (;;) {
+#if DEBUG_
+        // 进入低功耗的情况：无操作、无OTA、无处于联网过程中、无图片上传
+        printf("低功耗检测任务中按键状态：%d\n", key_get_status());
+#endif
+        if (KEY_FUNC_OFF == key_get_status() && !get_upload_status()) {  // 使用函数获取状态
+            s_timeout++;
+        } else {
+            s_timeout = 0;
+        }
+
+        // 根据唤醒原因选择不同的超时时间
+        uint32_t poweroff_timeout = s_is_poweron ? TIME_FIRST_POWEROFF : TIME_NORMAL_POWEROFF;
+        
+        if (s_timeout >= poweroff_timeout) {
+            s_timeout = 0;
+            ESP_LOGI("DEEPSLEEP", "timeout....Entering deep sleep");
+            enter_deepsleep();
+        }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }  
+}
 

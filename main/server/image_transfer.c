@@ -67,6 +67,12 @@ static void print_memory_info(void);
  * 
  * @param sock 需要重启的套接字句柄
  */
+void restart_sock(int sock)
+{
+    ESP_LOGI(TAG, "Shutting down socket and restarting...");
+    shutdown(sock, 0);
+    close(sock);
+}
 
 /**
  * @brief UDP客户端发送任务
@@ -76,13 +82,105 @@ static void print_memory_info(void);
  * 
  * @param arg 任务参数（未使用）
  */
+void udp_client_send_task(void* arg)
+{
+    const int size = 96*3*8;         // 每个数据包的大小
+    uint8_t* payload = (uint8_t*)malloc((size + sizeof(packet_header_t)) * sizeof(uint8_t));
 
+    if (!payload) {
+        ESP_LOGE(TAG, "Memory allocation failed");
+        return;
+    }
+
+    // 初始化数据包头部
+    packet_header_t header = {0};
+    header.seq_num = 0;
+    header.total_packets = 13;
+    header.payload_length = (size > 255) ? 255 : (uint8_t)size;  // 限制在uint8_t范围内
+
+    QueueMessage_t message;
+    while(true) {
+        if(xQueueReceive(udp_evt_queue, &message, xOneSecond)) {
+            uint8_t* jpeg_new_buffer = message.buffer;
+
+            // 创建UDP套接字
+            int sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
+            if (sock < 0) {
+                ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+                restart_sock(sock);
+            } else {
+                // 分包发送图像数据
+                for(int i=0; i<12; i++) {
+                    header.seq_num = i + 1;
+
+                    // 组装数据包：头部+数据
+                    memcpy(payload, &header, sizeof(packet_header_t));
+                    memcpy(&payload[sizeof(packet_header_t)], &jpeg_new_buffer[i*size], size);
+
+                    // 发送数据包
+                    int err = sendto(sock, payload, size+sizeof(packet_header_t), 0, 
+                                     (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                    if (err < 0) {
+                        ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                        restart_sock(sock);
+                    } else {
+                        ESP_LOGI(TAG, "Packet %d of %d sent", header.seq_num, header.total_packets);
+                    }
+                    vTaskDelay(10 / portTICK_PERIOD_MS);
+                }
+
+                // 发送识别结果包
+                uint8_t result = (uint8_t)(message.result * 100);
+                ESP_LOGI(TAG, "result = %u", result);
+                
+                // 识别结果作为第13个包发送
+                header.seq_num = 13;
+                uint8_t result_pac[4] = {header.seq_num, header.total_packets, 0, result};
+                int err = sendto(sock, result_pac, 4, 0, 
+                                 (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                if (err < 0) {
+                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    restart_sock(sock);
+                } else {
+                    ESP_LOGI(TAG, "Packet %d of %d sent", header.seq_num, header.total_packets);
+                }
+
+                restart_sock(sock);
+            }
+        }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    
+    free(payload);
+}
+
+char* update_udp_ip()
+{
+    return get_udp_ip();
+}
 
 /**
  * @brief 初始化UDP客户端
  * 
  * 配置UDP目标地址和参数，创建消息队列和发送任务
  */
+void udp_client_init()
+{
+    if (update_udp_ip() == NULL){
+        dest_addr.sin_addr.s_addr = inet_addr(HOST_IP_ADDR);
+    }else{
+        dest_addr.sin_addr.s_addr = inet_addr(update_udp_ip());
+    }
+    // 配置UDP目标地址
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(PORT);
+    addr_family = AF_INET;
+    ip_protocol = IPPROTO_IP;
+
+    // 创建UDP消息队列和发送任务
+    udp_evt_queue = xQueueCreate(10, sizeof(QueueMessage_t));
+    xTaskCreate(udp_client_send_task, "udp_client_send_task", 4096, NULL, 1, NULL);
+}
 
 
 /*************************************UDP图像传输************************************************ */
