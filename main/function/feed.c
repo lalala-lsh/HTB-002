@@ -576,6 +576,13 @@ static void switch_led_color(void) {
 /** 
  * \brief 更新哺光时间  linjun
  **/
+void update_feed_time(void)
+{
+    int feed_t = 0;
+
+    feed_t = get_device_para(DEVICE_PARA_FEED_T);
+    feed_timecontrol = feed_t * 60;//linjun
+}
 /** 
  * \brief 更新红光模式下加热状态
  * 
