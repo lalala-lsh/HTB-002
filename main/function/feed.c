@@ -572,6 +572,13 @@ static void switch_led_color(void) {
 /** 
  * \brief 更新哺光档位占空比
  **/
+void update_feed_duty(void){
+    int feed_p;
+
+    feed_p = get_device_para(DEVICE_PARA_FEED_P);
+
+    FEED_DUTY = ((FEED_DUTY_MAX) * feed_p) / 100;
+}
 
 /** 
  * \brief 更新哺光时间  linjun
