@@ -569,6 +569,91 @@ static void switch_led_color(void) {
     }
 }
 
+static void running_light_task(void* arg) 
+{
+    // 预定义所有灯光模式的PIN配置
+    typedef struct {
+        const snPinName_t* pins;
+        size_t length;
+    } PinGroup;
+
+    // 定义灯光模式的PIN配置
+    static const snPinName_t pin_sequence_mode_0[] = {PIN_P05, PIN_P04, PIN_P03, PIN_P02, PIN_P01, PIN_P00, PIN_P14, PIN_P12, PIN_P13, PIN_P17, PIN_P16, PIN_P15, PIN_P14, PIN_P00};
+    static const snPinName_t pin_sequence_mode_1[] = {PIN_P01, PIN_P02, PIN_P03, PIN_P04, PIN_P05, PIN_P00, PIN_P14, PIN_P15, PIN_P16, PIN_P17, PIN_P13, PIN_P12, PIN_P14, PIN_P00};
+    static const snPinName_t step1[] = {PIN_P00, PIN_P14};
+    static const snPinName_t step2[] = {PIN_P01, PIN_P05, PIN_P15, PIN_P12};
+    static const snPinName_t step3[] = {PIN_P02, PIN_P04, PIN_P16, PIN_P13};
+    static const snPinName_t step4[] = {PIN_P03, PIN_P17};
+    static const snPinName_t steps[][2] = {
+        {PIN_P00, PIN_P14}, {PIN_P05, PIN_P12}, {PIN_P04, PIN_P13},
+        {PIN_P03, PIN_P17}, {PIN_P02, PIN_P16}, {PIN_P01, PIN_P15}
+    };
+    static const snPinName_t all_pins[] = {PIN_P00, PIN_P14, PIN_P05, PIN_P12, PIN_P04, PIN_P13, 
+                                         PIN_P03, PIN_P17, PIN_P02, PIN_P16, PIN_P01, PIN_P15};
+
+    // 预定义步骤组，用于模式3
+    static const PinGroup step_groups[] = {
+        {step1, sizeof(step1)/sizeof(step1[0])},
+        {step2, sizeof(step2)/sizeof(step2[0])},
+        {step3, sizeof(step3)/sizeof(step3[0])},
+        {step4, sizeof(step4)/sizeof(step4[0])}
+    };
+
+    // 定义延迟常量
+    const int SEQUENCE_DELAY = 200;
+    const int ALL_FLASH_DELAY = 1000;
+
+    for(;;) {
+        if (feed_status == BEICI_ING) {
+            // 根据当前模式执行相应的灯光效果
+            switch (current_mode) {
+                case BEICI_MODE_1:  // 模式：顺序点亮
+                    for (int i = 0; i < sizeof(pin_sequence_mode_0)/sizeof(pin_sequence_mode_0[0]); i++) {
+                        flash_pins(&pin_sequence_mode_0[i], 1, SEQUENCE_DELAY);
+                    }                    
+                    switch_led_color();                    
+                    break;
+
+                case BEICI_MODE_2:  // 模式：反向顺序点亮
+                    for (int i = 0; i < sizeof(pin_sequence_mode_1)/sizeof(pin_sequence_mode_1[0]); i++) {
+                        flash_pins(&pin_sequence_mode_1[i], 1, SEQUENCE_DELAY);
+                    }
+                    switch_led_color();
+                    break;
+
+                case BEICI_MODE_3:  // 模式：分组闪烁
+                    for (int i = 0; i < sizeof(step_groups)/sizeof(step_groups[0]); i++) {
+                        flash_pins(step_groups[i].pins, step_groups[i].length, SEQUENCE_DELAY);
+                    }
+                    switch_led_color();
+                    break;
+
+                case BEICI_MODE_4:  // 模式：对称闪烁
+                    for (int i = 0; i < sizeof(steps)/sizeof(steps[0]); i++) {
+                        flash_pins(steps[i], 2, SEQUENCE_DELAY);
+                    }
+                    switch_led_color();
+                    break;
+
+                case BEICI_MODE_5:  // 模式：全体闪烁
+                    flash_pins(all_pins, sizeof(all_pins)/sizeof(all_pins[0]), ALL_FLASH_DELAY);
+                    switch_led_color();
+                    break;
+
+                default:
+                    vTaskDelay(100 / portTICK_PERIOD_MS);
+                    break;
+            }
+            
+            // 检查是否需要切换到下一个模式
+            if (beici_timecnt >= ((current_mode + 1) * s_beici_time_everymode) && current_mode < BEICI_MODE_MAX - 1) {
+                current_mode++;
+                ESP_LOGI(TAG, "彩光模式切换至 = %d", current_mode);
+            }
+        }       
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
 /** 
  * \brief 更新哺光档位占空比
  **/

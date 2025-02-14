@@ -267,6 +267,53 @@ void build_feedreport(esp_mqtt_client_handle_t client, int level, int start_tm, 
 	}
 }
 //是否需要该函数，用于上传当前训练状态--linjun
+void build_changemode(esp_mqtt_client_handle_t client, int level, char * rid)
+{
+	if (client != NULL)
+	{
+		char * levelstr = NULL;
+		switch(level)
+		{
+			case 0x01:
+				levelstr = "Feeding";//linjun
+				break;
+			case 0x02:
+				levelstr = "Amblyopia";//linjun
+				break;
+			case 0x03:
+				levelstr = "Heat";//加热模式
+				break;
+			default:
+				levelstr = "Feeding";
+				break;
+		}
+		
+		char Rid[30];
+		time_t rawtime;
+		uint64_t current_time_ms = esp_timer_get_time()/1000;
+		int ms_pre = current_time_ms%1000;
+		snprintf(Rid, 30, "%s%ld%d", c_user_data, (long)time(&rawtime), ms_pre);
+		
+		cJSON *root = NULL;
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "CMD", CMD_CHANGEMODE);
+		cJSON_AddStringToObject(root, "VERSION", device_version);
+		cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+		cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+		cJSON_AddNumberToObject(root, "DEVICE_TIME", time(NULL));
+		cJSON_AddStringToObject(root, "DEVICE_MODE", levelstr);
+		cJSON_AddStringToObject(root, "RID", rid==NULL?Rid:rid);
+
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root);
+		int msg_id;
+		(void)msg_id;
+		msg_id = esp_mqtt_client_publish(client, push_topic, String, strlen(String), 0, 0);
+		ESP_LOGI(TAG, "sent publish successful, change mode msg:%s, msg_id=%d", levelstr, msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+	}
+}
 
 
 // void build_protocalversion(esp_mqtt_client_handle_t client)
