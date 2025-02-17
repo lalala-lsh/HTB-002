@@ -497,6 +497,13 @@ static void feed_task(void* arg)
 #endif
 
 // 初始化彩光模式
+static void initialize_beici_mode(void) {
+    current_mode = 0; // 灯珠切换自动切换任务启动
+    beici_first = 1;  // 用于首次计时
+    
+    // build_changemode(get_mqtt_client(), 4, NULL);
+    ESP_LOGI("RUOSHI", "彩光模式开始，保留开始时间戳:%ld", (long)beici_st);
+}
 
 // 处理哺光完成
 

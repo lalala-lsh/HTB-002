@@ -246,6 +246,22 @@ static void key_interrupt_task(void *arg)
                         key_status = KEY_FUNC_HEAT;
                         //发送语音"开启加热"
                         break;
+                    case KEY_FUNC_MODE_2:
+                        play_voice(HEATING);
+                        beici_func_set(FUNC_OFF); //关闭贝茨模式
+                        heating_control(FUNC_ON);//开启加热模式
+                        set_func_led(KEY_FUNC_HEAT, FUNC_ON);
+                        key_status = KEY_FUNC_HEAT;
+                        //发送语音"开启加热"
+                        break;
+                    case KEY_FUNC_HEAT:
+                        play_voice(HEATING_END);
+                        save_heat_only_record();  // 保存加热历史记录
+                        heating_control(FUNC_OFF);//关闭加热模式
+                        set_func_led(KEY_FUNC_OFF, FUNC_OFF);
+                        key_status = KEY_FUNC_OFF;
+                        //发送语音"关闭加热"
+                        break;
                     default:
                         key_status = KEY_FUNC_OFF;
                         feed_func_set(FUNC_OFF);
