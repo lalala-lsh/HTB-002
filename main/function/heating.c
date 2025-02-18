@@ -97,6 +97,38 @@ void heating_control(uint8_t en_flag)
 
 // 保存单独加热模式的历史记录（供外部调用）
 
+static void heat_task(void* arg){
+
+    for(;;) {
+        if (key_get_status() == KEY_FUNC_HEAT) {
+            if (!heat_rf_reopened && !heat_rf_managed) {
+                heat_rf_shutdown();
+            }
+
+            s_heat_cnt++;
+            ESP_LOGI(TAG, "s_heating == FUNC_ON.....s_heat_cnt = %lu", s_heat_cnt);
+
+            if (!heat_rf_reopened) {
+                uint32_t reopen_at = (heat_timecontrol > 20) ? (heat_timecontrol - 20) : 0;
+                if (s_heat_cnt >= reopen_at) {
+                    heat_rf_restore();
+                }
+            }
+
+            if (s_heat_cnt >= heat_timecontrol) {//linjun
+                // 保存加热历史记录
+                save_heat_only_record();
+
+                set_func_led(KEY_FUNC_OFF, FUNC_OFF);//linjun  自动训练完后关闭状态指示灯
+                heating_control(FUNC_OFF);
+                key_set_status(KEY_FUNC_OFF);
+                play_voice(HEATING_END);
+                ESP_LOGI(TAG, "时间到-----关闭----加热功能");
+            }
+        }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);      // 每隔1s判断1次
+    }
+}
 
 void heating_init(void)
 {
