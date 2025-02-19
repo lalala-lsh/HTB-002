@@ -96,6 +96,73 @@ void heating_control(uint8_t en_flag)
 }
 
 // 保存单独加热模式的历史记录（供外部调用）
+void save_heat_only_record(void)
+{
+    if (heat_start_time == 0) {
+        ESP_LOGW(TAG, "加热开始时间无效，跳过保存记录");
+        return;
+    }
+
+    int64_t end_time = 0;
+    int64_t end_mono_us = esp_timer_get_time();
+    int work_time = (int)s_heat_cnt;
+
+    if (heat_start_mono_us > 0 && end_mono_us > heat_start_mono_us) {
+        work_time = (int)((end_mono_us - heat_start_mono_us) / 1000000);
+    }
+
+    // 时间源策略: 系统时间time()走时准确（无论是否SNTP），优先用它
+    // end = time(), start = end - work_time, 保证 END-START==WORK_TIME
+    time_t sys_time = time(NULL);
+    if (sys_time >= 1704067200) {
+        end_time = (int64_t)sys_time;
+        heat_start_time = end_time - work_time;
+    } else if (heat_start_time > 0) {
+        // 系统时间无效，用start正推
+        end_time = heat_start_time + work_time;
+    } else {
+        end_time = 0;
+    }
+    
+    // 获取当前设定的加热时长（秒）
+    int heat_t = get_device_para(DEVICE_PARA_HEAT_T);
+    uint32_t heat_timecontrol_seconds = heat_t * 60;
+    
+    // 判断是否完整训练完成（达到设定时长，允许1秒误差）
+    bool is_complete = (work_time >= (int)heat_timecontrol_seconds - 1);
+    
+    if (is_complete) {
+        // 完整训练完成，无论时长多少都保存
+        ESP_LOGI(TAG, "完整训练完成，保存记录: work_time=%d秒, 设定时长=%lu秒",
+                 work_time, (unsigned long)heat_timecontrol_seconds);
+    } else {
+        // 中途停止，需要>3分钟才保存
+        if (work_time < 180) {
+            ESP_LOGI(TAG, "加热时间不足3分钟(%d秒)且未完整训练完成，跳过保存记录", work_time);
+            heat_start_time = 0;
+            return;
+        }
+        ESP_LOGI(TAG, "中途停止但时间>3分钟，保存记录: work_time=%d秒", work_time);
+    }
+
+    struct tm timeinfo;
+    time_t now = (time_t)end_time;
+    localtime_r(&now, &timeinfo);
+    int day = timeinfo.tm_mday;
+    uint32_t rcg_code = generate_rcg_code();
+
+    ESP_LOGI(TAG, "保存加热记录: start=%lld, end=%lld, work_time=%d, 完整完成=%s", 
+             heat_start_time, end_time, work_time, is_complete ? "是" : "否");
+
+    if (get_wifi_status() == WIFI_STATE_CONNECTED && get_mqtt_status() == MQTT_EVENT_CONNECTED_) {
+        build_feedreport(get_mqtt_client(), 0x03, heat_start_time, end_time, work_time, rcg_code, 0, 0, 0, 1);
+    } else {
+        store_record(0x03, heat_start_time, end_time, work_time, rcg_code, day, 0, 0, 0, 1, RECORD_FD);
+    }
+
+    heat_start_time = 0;  // 重置开始时间
+    heat_start_mono_us = 0;
+}
 
 static void heat_task(void* arg){
 
