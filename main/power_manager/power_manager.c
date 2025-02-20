@@ -51,6 +51,47 @@ extern QueueHandle_t voice_evt_queue;
 // 移除重复的校准函数，校准逻辑整合到 voltage_to_battery_percentage() 中
 
 // 使用动态校准的电压-电量映射函数（仅使用ADC电压）
+static int voltage_to_battery_percentage(int adc_voltage_mv)
+{
+    // 对ADC电压进行动态校准
+    if(adc_voltage_mv > max_recorded_voltage) {
+        max_recorded_voltage = adc_voltage_mv;
+        
+        // 如果检测到的ADC电压超过1900mV，进行校准
+        if(max_recorded_voltage >= 1900) {
+            calibrated_full_voltage = (max_recorded_voltage > 2000) ? 2000 : max_recorded_voltage;
+            is_calibration_done = true;
+            
+            // 保存校准数据到NVS
+            nvs_handle_t handle;
+            esp_err_t err = nvs_open("battery_cal", NVS_READWRITE, &handle);
+            if (err == ESP_OK) {
+                nvs_set_i32(handle, "max_voltage", max_recorded_voltage);
+                nvs_set_i32(handle, "full_voltage", calibrated_full_voltage);
+                uint8_t cal_done = is_calibration_done ? 1 : 0;
+                nvs_set_u8(handle, "cal_done", cal_done);
+                nvs_commit(handle);
+                nvs_close(handle);
+            }
+            
+#if DEBUG_
+            ESP_LOGI("BATTERY", "电池校准完成，满电ADC电压设为:%dmV，已保存到NVS", calibrated_full_voltage);
+#endif
+        }
+    }
+    
+    // 使用校准后的电压范围
+    const int ADC_MIN_VOLTAGE = 1500;
+    int ADC_MAX_VOLTAGE = is_calibration_done ? calibrated_full_voltage : 2000;
+
+    if (adc_voltage_mv <= ADC_MIN_VOLTAGE) {
+        return 0;
+    } else if (adc_voltage_mv >= ADC_MAX_VOLTAGE) {
+        return 100;
+    } else {
+        return ((adc_voltage_mv - ADC_MIN_VOLTAGE) * 100) / (ADC_MAX_VOLTAGE - ADC_MIN_VOLTAGE);
+    }
+}
 
 
 
@@ -65,6 +106,25 @@ int get_battery_power()
 }
 
 // 重置电池校准（如果需要的话）
+void reset_battery_calibration(void)
+{
+    max_recorded_voltage = 0;
+    calibrated_full_voltage = 2000;  // 重置为默认ADC满电电压
+    is_calibration_done = false;
+    
+    // 删除NVS中的校准数据
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("battery_cal", NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        nvs_erase_key(handle, "max_voltage");
+        nvs_erase_key(handle, "full_voltage");
+        nvs_erase_key(handle, "cal_done");
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+    
+    ESP_LOGI("BATTERY", "电池校准已重置，NVS数据已清除");
+}
 
 // 移除启用低电量警告函数
 
