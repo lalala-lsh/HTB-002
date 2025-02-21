@@ -199,6 +199,42 @@ static void power_adc_init(void)
 
 // 初始化电量管理
 
+static void power_check()
+{
+    // adc_raw是ADC转换结果的原始值
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, CHARGE_ADC1_CHAN0, &adc_raw));
+    // adc_cali_raw_to_voltage用于校准转换结果
+    ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw, &voltage));
+
+    // 使用简化的电压-电量映射函数
+    power = voltage_to_battery_percentage(voltage);
+    
+    // 设置电量状态
+    if (voltage > LOW_POWER){
+#if DEBUG_
+         ESP_LOGI("BATTERY", "电量正常");
+         ESP_LOGI("电量", "ADC原始值 = %d, 百分比 = %d%%, ADC电压 = %dmV", 
+                  adc_raw, power, voltage);
+#endif
+         power_timecnt = 0;
+         power_state = POWER_STATE_NORMAL;
+    } else {
+        // 设置低电量状态
+        if(power_state != POWER_STATE_LOW) {
+            power_state = POWER_STATE_LOW;
+            power_timecnt = 0; // 重置计数器，开始新的45秒倒计时
+#if DEBUG_
+            ESP_LOGI("BATTERY", "设置为低电量状态，ADC原始值:%d, 百分比:%d%%, ADC电压:%dmV", 
+                     adc_raw, power, voltage);   
+#endif
+        }
+    }   
+    
+#if DEBUG_
+    ESP_LOGI("BATTERY", "电量显示:%d%%, ADC原始值:%d, ADC电压:%dmV", 
+             power, adc_raw, voltage);
+#endif
+}
 
 static void power_check_task(void* arg)
 {
