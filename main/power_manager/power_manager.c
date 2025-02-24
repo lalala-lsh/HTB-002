@@ -305,3 +305,39 @@ static void deepsleep_task(void* arg)
     }  
 }
 
+void power_manager_init(void)
+{
+    // 获取复位原因
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    // 检查唤醒原因
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    
+    // 只有在正常上电复位且不是从睡眠唤醒的情况下才使用3分钟超时
+    if (reset_reason == ESP_RST_POWERON && wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
+        // 如果是正常开机
+        s_is_poweron = true;
+        ESP_LOGI("DEEPSLEEP", "正常开机唤醒(POWERON)，3分钟后进入低功耗");
+    } else {
+        // 如果是其他唤醒原因（睡眠唤醒或其他复位原因如brownout）
+        s_is_poweron = false;
+        
+        // 输出详细的唤醒和复位信息，便于调试
+        if (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED) {
+            ESP_LOGI("DEEPSLEEP", "从睡眠状态唤醒，唤醒原因:%d，1分钟后进入低功耗", wakeup_reason);
+        } else {
+            const char* reset_reasons[] = {
+                "正常上电复位", "未知原因复位", "硬件看门狗复位", "软件看门狗复位", 
+                "软件触发复位", "深度睡眠唤醒", "掉电复位(Brownout)"
+            };
+            ESP_LOGI("DEEPSLEEP", "系统复位，原因:%s，1分钟后进入低功耗", 
+                     (reset_reason < 7) ? reset_reasons[reset_reason] : "其他原因");
+        }
+    }
+
+    power_adc_init();  // 电池电量ADC检测初始化
+    power_init();  // 电量管理初始化
+
+    xTaskCreate(deepsleep_task, "deepsleep_task", 4096, NULL, PRIORITY_DEEPSLEEP_TASK, NULL);
+    
+    power_check_first();
+}
