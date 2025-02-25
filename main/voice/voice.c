@@ -156,6 +156,27 @@ void update_volume(void)
  * 
  * @param power_on true为开启电源，false为关闭电源
  */
+static void voice_power_control(bool power_on)
+{
+    if(power_on) {
+        // 开启语音芯片电源
+        Xl9535_Set_Io_Status(PIN_P07, IO_HIGH);
+        vTaskDelay(100 / portTICK_PERIOD_MS); // 等待电源稳定
+        
+        // 重新初始化时钟线和数据线
+        gpio_set_level(IO_CLK, 1);
+        gpio_set_level(IO_DATA, 1);
+        
+        // 重新设置音量
+        update_volume();
+        
+        ESP_LOGI(TAG, "语音芯片电源已开启");
+    } else {
+        // 关闭语音芯片电源
+        Xl9535_Set_Io_Status(PIN_P07, IO_LOW);
+        ESP_LOGI(TAG, "语音芯片电源已关闭");
+    }
+}
 
 /**
  * @brief 播放语音命令
@@ -180,6 +201,10 @@ void play_voice(uint8_t command)
  * 
  * @param power_on true为开启电源，false为关闭电源
  */
+void voice_power_control_ext(bool power_on)
+{
+    voice_power_control(power_on);
+}
 
 /**
  * @brief 语音命令处理任务
