@@ -57,35 +57,292 @@ void check_network() {
  * \brief 初始化SNTP功能
  * 包括设置SNTP运行模式，设置服务器地址，打印服务器地址
  */
+void initialize_sntp(void) {
+    ESP_LOGI(TAG, "初始化SNTP");
+
+	ESP_LOGI(TAG, "Initializing SNTP");
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+
+	sntp_setservername(0, NTP_SERVERS[0]);
+	sntp_setservername(1, NTP_SERVERS[1]);
+	sntp_setservername(2, NTP_SERVERS[2]);
+
+	for (uint8_t i = 0; i < SNTP_MAX_SERVERS; ++i){
+        if (sntp_getservername(i)){
+            ESP_LOGI(TAG, "server %d: %s", i, sntp_getservername(i));
+        } else {
+			ESP_LOGI(TAG, "if(sntp_getservername(i))判断为负");
+            char buff[INET6_ADDRSTRLEN];
+            ip_addr_t const *ip = sntp_getserver(i);
+            if (ipaddr_ntoa_r(ip, buff, INET6_ADDRSTRLEN) != NULL)
+                ESP_LOGI(TAG, "server %d: %s", i, buff);
+        }
+    }
+}
 
 /*!
  * \brief 同步SNTP时间到RTC
  * 读取同步完成标志位，等待完成
  * 完成后比较RTC时间与当前同步后的系统时间，相差较大则进行同步
  */
+void setSNTP()
+{
+	ESP_LOGI(TAG, "setSNTP函数被调用\n");
+	readFlag = true; // 表示资源被占用
+
+	// 通过SNTP获取网络时间
+    time_t now = 0;
+    struct tm timeinfo_sntp = {0};
+	int count_retry = 0;
+
+	while (1)
+	{
+		int state = sntp_get_sync_status();
+		ESP_LOGI(TAG, "the first state:%d", state);
+
+		if(state != SNTP_SYNC_STATUS_COMPLETED)
+		{
+			if(count_retry < 5){
+				vTaskDelay(pdMS_TO_TICKS(2000));
+				time(&now);
+				localtime_r(&now, &timeinfo_sntp);
+				ESP_LOGI(TAG, "System time: %s", asctime(&timeinfo_sntp));
+				count_retry++;
+			} else{
+				count_retry = 0;
+				ESP_LOGE(TAG, "达到最大尝试次数");
+				readFlag = false; // 释放资源
+				return;
+			}
+		} else if(state == SNTP_SYNC_STATUS_COMPLETED){
+			time(&now);
+			localtime_r(&now, &timeinfo_sntp);
+			ESP_LOGI(TAG, "同步完成，System time is set to %s", asctime(&timeinfo_sntp));
+			break;
+		} 
+    }
+
+	// 判断SNTP所获取的timeinfo与ds1302当前时间之间的差值
+	DS1302_DateTime dtr;
+	if (!DS1302_getDateTime(&ds1302_dev, &dtr)) {
+		ESP_LOGE("SNTP", "Error: DS1302 read failed");
+	} else{
+		ESP_LOGI("SNTP", "同步之前的RTC时间：%d %02d-%02d-%d %d:%02d:%02d",
+			dtr.dayWeek, 
+			dtr.dayMonth, dtr.month, dtr.year, 
+			dtr.hour, dtr.minute, dtr.second);
+
+		if((dtr.year != (timeinfo_sntp.tm_year+1900)) | 
+		   (dtr.month != (timeinfo_sntp.tm_mon+1)) | 
+		   (dtr.dayMonth != timeinfo_sntp.tm_mday) |
+		   (dtr.dayWeek != timeinfo_sntp.tm_wday) |
+		   (dtr.hour != timeinfo_sntp.tm_hour) |
+		   (dtr.minute != timeinfo_sntp.tm_min) |
+		   (dtr.second - timeinfo_sntp.tm_sec > 15) | 
+		   (timeinfo_sntp.tm_sec - dtr.second > 15))
+		{
+			DS1302_DateTime dtw;
+			dtw.second 		= timeinfo_sntp.tm_sec;
+			dtw.minute 		= timeinfo_sntp.tm_min;
+			dtw.hour   		= timeinfo_sntp.tm_hour;
+			dtw.dayWeek 	= timeinfo_sntp.tm_wday;
+			dtw.dayMonth 	= timeinfo_sntp.tm_mday;
+			dtw.month 		= (timeinfo_sntp.tm_mon + 1);
+			dtw.year 		= (timeinfo_sntp.tm_year + 1900);
+			DS1302_setDateTime(&ds1302_dev, &dtw);
+			ESP_LOGI("SNTP", "DS1302 RTC time is set\n");
+
+			if (!DS1302_getDateTime(&ds1302_dev, &dtr)) {
+				ESP_LOGE("SNTP", "Error: DS1302 read failed");
+			} else{
+				ESP_LOGI("SNTP", "同步之后的RTC时间：%d %02d-%02d-%d %d:%02d:%02d",
+					dtr.dayWeek, 
+					dtr.dayMonth, dtr.month, dtr.year, 
+					dtr.hour, dtr.minute, dtr.second);
+			}
+		} else{
+			ESP_LOGI("SNTP", "DS1302 RTC time no need to be set\n");
+		}
+	}
+
+	// 标记系统时间已同步
+	system_time_synced = true;
+
+	// 网络时间同步成功后，设置RTC初始化标志
+	extern bool RTCTimeSet_flag;
+	RTCTimeSet_flag = true;
+	ESP_LOGI("SNTP", "网络时间同步完成，设置RTCTimeSet_flag = true");
+
+	// 保存当前有效时间到NVS，作为备份
+	time(&now);
+	save_valid_time_to_nvs(now);
+	ESP_LOGI("SNTP", "已保存SNTP时间到NVS备份，时间戳: %ld", (long)now);
+
+	readFlag = false;
+}
 
 /*!
  * \brief 获取SNTP网路时间功能
  * sntp_init()开始申请服务器返回网络时间
  * setSNTP()通过读取同步完成标志位结束等待
  */
+void obtain_time()
+{
+	while(readFlag == true){
+		vTaskDelay(100 / portTICK_PERIOD_MS);
+	}
+	if(readFlag == false){
+		sntp_init(); 
+		setSNTP();
+	} 
+}
 
 /*!
  * \brief 从RTC中读取时间，将当前的时间设置到系统中去
  * 设备代码运行之初调用该功能
  * 时间源优先级：1. RTC硬件时间（最优先） 2. NVS备份时间 3. 编译时间
  */
+bool RTCTimeToSystemTime()
+{
+	/* 设置时区 */
+	setenv("TZ", "CST-8", 1);
+	tzset();
+	/* 初始化 */
+	struct timeval tv = {0};
+	struct tm tm_time = {0};
+	bool time_source_valid = false;
+
+	/* 尝试从RTC获取时间 */
+	DS1302_DateTime dtr;
+	if (DS1302_getDateTime(&ds1302_dev, &dtr) && dtr.year >= 2020 && dtr.year <= 2050) {
+		/* RTC时间获取成功且合理，设置到系统时间中去 */
+		ESP_LOGI("RTC", "RTC时间有效：%d %02d-%02d-%d %d:%02d:%02d",
+			dtr.dayWeek,
+			dtr.dayMonth, dtr.month, dtr.year,
+			dtr.hour, dtr.minute, dtr.second);
+		/* 转换结构体格式 */
+		tm_time.tm_wday = dtr.dayWeek;
+		tm_time.tm_mday = dtr.dayMonth;
+		tm_time.tm_mon	= dtr.month - 1;
+		tm_time.tm_year	= dtr.year - 1900;
+		tm_time.tm_hour	= dtr.hour;
+		tm_time.tm_min	= dtr.minute;
+		tm_time.tm_sec	= dtr.second;
+		/* 设置到系统时间 */
+		tv.tv_sec = mktime(&tm_time) + TIMEZONE_HOURS * 3600;
+		settimeofday(&tv, NULL);
+		time_source_valid = true;
+		ESP_LOGI("RTC", "系统时间已从RTC同步，时间戳：%ld", (long)tv.tv_sec);
+	} else {
+		ESP_LOGW("RTC", "DS1302读取失败或时间不合理，尝试使用NVS备份时间");
+
+		/* 尝试从NVS读取上次有效时间 */
+		time_t last_valid_time = load_last_valid_time_from_nvs();
+
+		if (last_valid_time > 1577836800) {  // 检查是否大于2020-01-01
+			/* 使用NVS备份时间 */
+			tv.tv_sec = last_valid_time;
+			settimeofday(&tv, NULL);
+			time_source_valid = true;
+			ESP_LOGI("RTC", "系统时间已从NVS备份同步，时间戳：%ld", (long)tv.tv_sec);
+		} else {
+			/* NVS也没有有效时间，使用2025年作为初始时间 */
+			/* 这种情况只在第一次初始化或NVS被清空时发生 */
+			static bool default_time_set = false;
+			if (!default_time_set) {
+				ESP_LOGW("RTC", "NVS中无有效时间，使用2025年作为初始时间");
+				tm_time.tm_year = 2025 - 1900;
+				tm_time.tm_mon = 0;  // 1月
+				tm_time.tm_mday = 1;
+				tm_time.tm_hour = 0;
+				tm_time.tm_min = 0;
+				tm_time.tm_sec = 0;
+				tv.tv_sec = mktime(&tm_time);
+				settimeofday(&tv, NULL);
+				ESP_LOGW("RTC", "系统时间已设置为默认值：2025-01-01，时间戳：%ld", (long)tv.tv_sec);
+				default_time_set = true;
+				// 虽然是默认时间，但也标记为已同步，避免频繁重试
+				time_source_valid = true;
+			} else {
+				// 已经设置过默认时间，不再重复设置
+				ESP_LOGD("RTC", "默认时间已设置，跳过重复初始化");
+				time_source_valid = false;
+			}
+		}
+	}
+
+	// 标记同步完成，避免频繁重试
+	if (time_source_valid) {
+		system_time_synced = true;
+		return true;
+	}
+
+	return false;
+}
 
 /*!
  * \brief 初始化RTC时间
  * 在设备时间未被设定的情况下，初始化一个设备时间
  */
+void RTCTime_init()
+{
+    if (DS1302_isWriteProtected(&ds1302_dev)) {
+        ESP_LOGE("RTC", "Error: DS1302 write protected");
+    }
+    DS1302_DateTime dt;
+    dt.second 	= 0;
+    dt.minute 	= 0;
+    dt.hour   	= 20;
+    dt.dayWeek 	= 3;
+    dt.dayMonth = 30;
+    dt.month 	= 8;
+    dt.year 	= 2023;
+    DS1302_setDateTime(&ds1302_dev, &dt);
+    
+    // 初始化后立即同步到系统时间
+    RTCTimeToSystemTime();
+}
 
 /*!
  * \brief 从RTC获取当前精确时间戳
  * 用于需要精确时间戳的场景，比如记录训练开始/结束时间
  * \return 当前RTC的时间戳
  */
+time_t get_rtc_timestamp()
+{
+    DS1302_DateTime dtr;
+    struct tm tm_time = {0};
+    
+    // 如果无法从RTC读取时间，返回系统时间
+    if (!DS1302_getDateTime(&ds1302_dev, &dtr)) {
+        ESP_LOGW("RTC", "无法读取RTC时间，使用系统时间");
+        return time(NULL);
+    }
+    
+    // 修复年份问题：如果年份不合理（如2000），使用系统时间
+    if (dtr.year < 2020 || dtr.year > 2050) {
+        ESP_LOGW("RTC", "RTC年份不合理 (%d)，使用系统时间", dtr.year);
+        ESP_LOGW("RTC", "原始RTC数据: %04d-%02d-%02d %02d:%02d:%02d", 
+                 dtr.year, dtr.month, dtr.dayMonth, dtr.hour, dtr.minute, dtr.second);
+        return time(NULL);
+    }
+    
+    // 转换RTC时间为时间戳格式
+    tm_time.tm_wday = dtr.dayWeek;
+    tm_time.tm_mday = dtr.dayMonth;
+    tm_time.tm_mon = dtr.month - 1;  
+    tm_time.tm_year = dtr.year - 1900;
+    tm_time.tm_hour = dtr.hour;
+    tm_time.tm_min = dtr.minute;
+    tm_time.tm_sec = dtr.second;
+    
+    // 调试日志
+    ESP_LOGI("RTC", "RTC时间有效: %04d-%02d-%02d %02d:%02d:%02d (tm_year=%d)", 
+             dtr.year, dtr.month, dtr.dayMonth, dtr.hour, dtr.minute, dtr.second, tm_time.tm_year);
+    
+    // 转换为时间戳并添加时区偏移
+    return mktime(&tm_time) + TIMEZONE_HOURS * 3600;
+}
 
 /*!
  * \brief 检查系统时间是否与RTC同步，若不同步则重新同步
@@ -98,6 +355,67 @@ void check_network() {
  * 优先信任系统时间（如果已通过SNTP同步），其次才检查RTC
  * \return true: 时间有效，false: 时间无效
  */
+bool is_time_valid(void)
+{
+    time_t sys_time = time(NULL);
+
+    // 优先级1：如果系统时间已同步（通过SNTP或RTC），直接信任系统时间
+    if (system_time_synced) {
+        if (sys_time >= 1704067200) {  // 2024-01-01 00:00:00 UTC
+            ESP_LOGI("TIME_CHECK", "系统时间已同步且有效，时间戳: %ld", (long)sys_time);
+            return true;
+        } else {
+            ESP_LOGW("TIME_CHECK", "系统时间已同步但时间戳过小: %ld", (long)sys_time);
+        }
+    }
+
+    // 优先级2：检查RTCTimeSet_flag（表示SNTP成功写入过RTC）
+    extern bool RTCTimeSet_flag;
+    if (RTCTimeSet_flag) {
+        // SNTP成功过，即使RTC读取有问题，也信任系统时间
+        if (sys_time >= 1704067200) {
+            ESP_LOGI("TIME_CHECK", "SNTP已同步标志有效，系统时间戳: %ld", (long)sys_time);
+            return true;
+        }
+    }
+
+    // 优先级3：即使标志位未设置，如果系统时间合理（>=2024年），也认为有效
+    // 这是为了处理系统已正确初始化但标志位未设置的情况
+    if (sys_time >= 1704067200) {  // 2024-01-01 00:00:00 UTC
+        struct tm timeinfo;
+        localtime_r(&sys_time, &timeinfo);
+        int year = timeinfo.tm_year + 1900;
+
+        // 如果年份在合理范围内（2024-2050），认为时间有效
+        if (year >= 2024 && year <= 2050) {
+            ESP_LOGI("TIME_CHECK", "系统时间合理（%d年），认为时间有效，时间戳: %ld",
+                     year, (long)sys_time);
+            // 自动设置同步标志
+            system_time_synced = true;
+            return true;
+        }
+    }
+
+    // 优先级4：尝试读取RTC验证（作为最后的验证手段）
+    DS1302_DateTime dtr;
+    if (DS1302_getDateTime(&ds1302_dev, &dtr)) {
+        // 检查RTC年份是否合理
+        if (dtr.year >= 2024 && dtr.year <= 2050) {
+            ESP_LOGI("TIME_CHECK", "RTC时间有效: %04d-%02d-%02d %02d:%02d:%02d",
+                     dtr.year, dtr.month, dtr.dayMonth, dtr.hour, dtr.minute, dtr.second);
+            return true;
+        } else {
+            ESP_LOGW("TIME_CHECK", "RTC年份不合理: %d", dtr.year);
+        }
+    } else {
+        ESP_LOGW("TIME_CHECK", "无法读取RTC时间");
+    }
+
+    // 所有检查都失败
+    ESP_LOGW("TIME_CHECK", "时间验证失败 - system_time_synced=%d, RTCTimeSet_flag=%d, sys_time=%ld",
+             system_time_synced, RTCTimeSet_flag, (long)sys_time);
+    return false;
+}
 
 /*!
  * \brief 尝试时间同步
