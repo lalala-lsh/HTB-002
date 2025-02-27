@@ -1199,11 +1199,58 @@ esp_err_t set_count_limit(int count)
  * @brief 保存有效时间到NVS
  * @param valid_time 有效的时间戳
  */
+void save_valid_time_to_nvs(time_t valid_time)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, TIME_BACKUP_SPACENAME, NVS_READWRITE, &my_handle);
+
+    if (err == ESP_OK) {
+        // 将time_t转换为int64_t以确保跨平台兼容性
+        int64_t time_value = (int64_t)valid_time;
+        err = nvs_set_i64(my_handle, TIME_BACKUP_KEY, time_value);
+
+        if (err == ESP_OK) {
+            err = nvs_commit(my_handle);
+            ESP_LOGI("TIME_BACKUP", "保存有效时间到NVS: %lld", (long long)time_value);
+        } else {
+            ESP_LOGE("TIME_BACKUP", "保存时间失败: %s", esp_err_to_name(err));
+        }
+        nvs_close(my_handle);
+    } else {
+        ESP_LOGE("TIME_BACKUP", "打开NVS分区失败: %s", esp_err_to_name(err));
+    }
+}
 
 /**
  * @brief 从NVS读取上次有效时间
  * @return 上次保存的有效时间戳，如果不存在返回0
  */
+time_t load_last_valid_time_from_nvs(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, TIME_BACKUP_SPACENAME, NVS_READONLY, &my_handle);
+
+    time_t last_time = 0;
+
+    if (err == ESP_OK) {
+        int64_t time_value = 0;
+        err = nvs_get_i64(my_handle, TIME_BACKUP_KEY, &time_value);
+
+        if (err == ESP_OK) {
+            last_time = (time_t)time_value;
+            ESP_LOGI("TIME_BACKUP", "从NVS读取上次有效时间: %lld", (long long)time_value);
+        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW("TIME_BACKUP", "NVS中没有保存的时间数据");
+        } else {
+            ESP_LOGE("TIME_BACKUP", "读取时间失败: %s", esp_err_to_name(err));
+        }
+        nvs_close(my_handle);
+    } else {
+        ESP_LOGW("TIME_BACKUP", "打开NVS分区失败: %s", esp_err_to_name(err));
+    }
+
+    return last_time;
+}
 
 // ==================== 设备日志相关函数 ====================
 

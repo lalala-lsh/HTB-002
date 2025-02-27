@@ -429,3 +429,28 @@ bool is_time_valid(void)
  * 确保返回的时间戳是有效的，如果时间无效则强制同步
  * \return 有效的时间戳，如果同步失败返回0
  */
+time_t get_safe_timestamp(void)
+{
+    // 先检查时间是否有效
+    if (!is_time_valid()) {
+        ESP_LOGW("SAFE_TIME", "时间无效，尝试强制同步");
+        
+        // 尝试进行时间同步
+        if (!wait_for_time_sync(0)) {
+            ESP_LOGE("SAFE_TIME", "时间同步失败，无法获取有效时间戳");
+            return 0;  // 返回0表示时间无效
+        }
+    }
+    
+    // 时间有效，返回RTC时间戳
+    time_t timestamp = get_rtc_timestamp();
+    
+    // 再次验证时间戳的合理性
+    if (timestamp < 1577836800) {  // 2020-01-01 00:00:00 UTC
+        ESP_LOGE("SAFE_TIME", "获取的时间戳无效: %ld", (long)timestamp);
+        return 0;
+    }
+    
+    ESP_LOGI("SAFE_TIME", "获取安全时间戳: %ld", (long)timestamp);
+    return timestamp;
+}

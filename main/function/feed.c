@@ -506,8 +506,101 @@ static void initialize_beici_mode(void) {
 }
 
 // 处理哺光完成
+static void handle_feed_completion(uint8_t *tcount, uint8_t *ccount, uint8_t *ecount) {
+    // 1. 用 monotonic 计算真实运行时长（绝对可信）
+    int64_t end_mono_us = esp_timer_get_time();
+    uint32_t work_time_sec = feed_timecnt;
+    if (feed_start_mono_us > 0 && end_mono_us > feed_start_mono_us) {
+        work_time_sec = (uint32_t)((end_mono_us - feed_start_mono_us) / 1000000);
+    }
+
+    // 自动到时完成时，工作时长按配置值上报，避免任务调度抖动导致180秒上报成183秒
+    if (work_time_sec > (uint32_t)feed_timecontrol) {
+        ESP_LOGW(TAG, "自动完成时长修正: measured=%lu, config=%d",
+                 (unsigned long)work_time_sec, feed_timecontrol);
+        work_time_sec = (uint32_t)feed_timecontrol;
+    }
+
+    // 2. 解算 start/end 时间戳（优先SNTP，反推start）
+    time_t resolved_start = (time_t)feed_st;
+    time_t resolved_end = 0;
+    resolve_training_timestamps(&resolved_start, &resolved_end, work_time_sec);
+    feed_st = (int)resolved_start;
+    feed_et = (int)resolved_end;
+
+    int level = key_get_status();
+    
+    // 3. 用解算后的 end_time 获取日期（不再依赖RTC读数）
+    time_t ts_for_day = (resolved_end > 0) ? resolved_end : time(NULL);
+    struct tm timeinfo;
+    localtime_r(&ts_for_day, &timeinfo);
+    
+    get_rcg_cnt(tcount, ccount, ecount);
+    ESP_LOGI(TAG, "FEED finish! day=%d, work=%lu, start=%ld, end=%ld, tcount=%d, ccount=%d, ecount=%d",
+             timeinfo.tm_mday, (unsigned long)work_time_sec, (long)feed_st, (long)feed_et, *tcount, *ccount, *ecount);
+    
+    // 网络上报或本地存储，传入当前训练的RCG_CODE
+    report_or_store_data(level, feed_st, feed_et, work_time_sec, timeinfo.tm_mday, *tcount, *ccount, *ecount, RECORD_FD, current_rcg_code);
+    *tcount = 0;
+    *ccount = 0;
+    
+    feed_func_set(FUNC_OFF);            // 停止哺光
+    key_set_status(KEY_FUNC_OFF);       // 按键状态恢复
+    set_func_led(KEY_FUNC_OFF, FUNC_OFF); // 关闭状态指示灯
+
+    xQueueReset(voice_evt_queue);       // 清空队列，防止残留命令（如WEAR_REMIND）干扰结束语音
+    play_voice(FEEDTRAIN_END);
+    
+    ESP_LOGI(TAG, "FEEDING NORMAL END");
+}
 
 // 处理彩光完成
+static void handle_beici_completion(uint8_t *tcount, uint8_t *ccount, uint8_t *bcount) {
+    // 1. 用 monotonic 计算真实运行时长（绝对可信）
+    int64_t end_mono_us = esp_timer_get_time();
+    uint32_t work_time_sec = beici_timecnt;
+    if (beici_start_mono_us > 0 && end_mono_us > beici_start_mono_us) {
+        work_time_sec = (uint32_t)((end_mono_us - beici_start_mono_us) / 1000000);
+    }
+
+    // 自动到时完成时，工作时长按配置值上报，避免任务调度抖动导致上报偏大
+    if (work_time_sec > (uint32_t)color_timecontrol) {
+        ESP_LOGW(TAG, "自动完成时长修正: measured=%lu, config=%d",
+                 (unsigned long)work_time_sec, color_timecontrol);
+        work_time_sec = (uint32_t)color_timecontrol;
+    }
+
+    // 2. 解算 start/end 时间戳（优先SNTP，反推start）
+    time_t resolved_start = (time_t)beici_st;
+    time_t resolved_end = 0;
+    resolve_training_timestamps(&resolved_start, &resolved_end, work_time_sec);
+    beici_st = (int)resolved_start;
+    beici_et = (int)resolved_end;
+    
+    int level = key_get_status();
+    
+    // 3. 用解算后的 end_time 获取日期
+    time_t ts_for_day = (resolved_end > 0) ? resolved_end : time(NULL);
+    struct tm timeinfo;
+    localtime_r(&ts_for_day, &timeinfo);
+    
+    // 彩光模式没有睁闭眼检测，所有计数应为0
+    *tcount = 0;
+    *ccount = 0;
+    *bcount = 0;
+    ESP_LOGI(TAG, "RUOSHI finish!!---timeinfo.tm_mday = %d, tcount = %d, ccount = %d", timeinfo.tm_mday, *tcount, *ccount);
+
+    // 网络上报或本地存储，彩光训练不需要RCG_CODE
+    report_or_store_data(level, beici_st, beici_et, work_time_sec, timeinfo.tm_mday, *tcount, *ccount, *bcount, RECORD_RS, 0);
+    
+    beici_first = 0;
+
+    xQueueReset(voice_evt_queue);
+    play_voice(COLORTRAIN_END);
+
+    beici_func_set(FUNC_OFF);      // 停止训练
+    key_set_status(KEY_FUNC_OFF);  // 按键状态恢复
+}
 
 // 网络上报或本地存储数据
 static void report_or_store_data(int level, time_t start_time, time_t end_time, uint32_t time_count,
