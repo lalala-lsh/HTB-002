@@ -326,6 +326,31 @@ void feed_gpio_init(void)
  * @Author LINJUN
  * @brief 蜂鸣器初始化
  */
+static void Pwm_40hz_init(void)
+{
+    // 配置PWM定时器
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = BEEP_PWM_MODE,
+        .timer_num        = BEEP_PWM_TIMER,
+        .duty_resolution  = BEEP_PWM_DUTY_RES,
+        .freq_hz          = BEEP_PWM_FREQUENCY,  // 设置输出频率为40Hz
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    // 配置蜂鸣器通道
+    ledc_channel_config_t beep_ledc_channel = {
+        .speed_mode     = BEEP_PWM_MODE,
+        .channel        = BEEP_PWM_CHANNEL,
+        .timer_sel      = BEEP_PWM_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = BEEP_PWM_OUTPUT_IO,
+        .duty           = 0, // 初始占空比为0%
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&beep_ledc_channel));
+
+}
 
 static void color_light_gpio_init(void)
 {
@@ -355,6 +380,31 @@ uint8_t feed_set_status()
  * @brief       创建一个静态函数，用于处理40hz蜂鸣器控制
  * @return      none
  ******************************************************************************/
+void dal_40hz_beep_control_switch(uint8_t onoff)
+{
+    switch(onoff)
+    {
+        case 0:
+            // turn off light
+            ESP_ERROR_CHECK(ledc_set_duty(BEEP_PWM_MODE, BEEP_PWM_CHANNEL, 0));
+            ESP_ERROR_CHECK(ledc_update_duty(BEEP_PWM_MODE, BEEP_PWM_CHANNEL));
+            break;
+        case 1:
+            // turn on light    10%
+            if(beep_status==1)
+            {
+                ESP_ERROR_CHECK(ledc_set_duty(BEEP_PWM_MODE, BEEP_PWM_CHANNEL, 410));
+                ESP_ERROR_CHECK(ledc_update_duty(BEEP_PWM_MODE, BEEP_PWM_CHANNEL));
+            }else{
+                ESP_ERROR_CHECK(ledc_set_duty(BEEP_PWM_MODE, BEEP_PWM_CHANNEL, 0));
+                ESP_ERROR_CHECK(ledc_update_duty(BEEP_PWM_MODE, BEEP_PWM_CHANNEL));
+            }
+            
+            break;
+        default:
+            break;
+    }
+}
 
 /*
 哺光功能控制
@@ -788,6 +838,18 @@ void update_feed_time(void)
 /** 
  * \brief 更新蜂鸣器状态  linjun
  **/
+bool update_beep_status()
+{
+    beep_status = get_device_para(DEVICE_PARA_40HZ);
+    if(beep_status == 1 && (key_get_status() == KEY_FUNC_MODE_1 || key_get_status() == KEY_FUNC_MODE_2 || key_get_status() == KEY_FUNC_HEAT)) 
+    {
+        dal_40hz_beep_control_switch(1);
+    }else{
+        dal_40hz_beep_control_switch(0);
+    }
+
+    return beep_status;
+}
 
 static void camera_task(void* arg){
     static bool first_feed_detect = true;  // 添加静态变量跟踪第一次检测
