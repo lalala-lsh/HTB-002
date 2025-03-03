@@ -63,6 +63,73 @@ mqtt_state_t get_mqtt_status()
  * @param event MQTT事件句柄
  * @return esp_err_t ESP_OK表示处理成功
  */
+static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
+{
+    esp_mqtt_client_handle_t client = event->client;
+    
+    switch (event->event_id) {
+        case MQTT_EVENT_CONNECTED:
+            client_now = client;
+            mqtt_state = MQTT_EVENT_CONNECTED_;
+            ESP_LOGI(TAG, "MQTT Event connected");
+            esp_mqtt_client_subscribe(client, get_sub_tpc(), 1);   // 订阅主题
+            build_versionmessage(client);                          // 版本校验信息上传
+            build_storagemessage(client);                          // 存储数据上传
+            xTaskCreate(mqtt_send_task, 
+                            "mqtt_hb", 
+                            8192, NULL,  // 增加栈大小到8KB，防止SSL传输时栈溢出
+                            PRIORITY_MQTT_SEND_TASK, 
+                            NULL);    // 创建心跳任务
+            ESP_LOGI(TAG, "心跳的循环事件开启");
+            break;
+
+        case MQTT_EVENT_DISCONNECTED:
+            mqtt_state = MQTT_EVENT_DISCONNECTED;
+            ESP_LOGW(TAG, "MQTT_EVENT_DISCONNECTED");
+            break;
+
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(TAG, "sent publish successful");
+            break;
+
+        case MQTT_EVENT_UNSUBSCRIBED:
+            ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_DATA:
+            // 如果正在上传图片，延迟处理MQTT数据避免SSL冲突
+            if (get_upload_status()) {
+                ESP_LOGD(TAG, "图片上传中，延迟处理MQTT数据");
+                return ESP_OK;  // 暂时跳过处理
+            }
+            
+            ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+            // 只打印有效JSON部分
+            char *end_of_json = strstr(event->data, "}");
+            if (end_of_json) {
+                ESP_LOGI(TAG, "DATA=%.*s",
+                        (int)(end_of_json - event->data + 1), event->data);
+            }
+            process_msg(client, event->data, event->data_len);
+            break;
+
+        case MQTT_EVENT_ERROR:
+            ESP_LOGE(TAG, "MQTT_EVENT_ERROR");
+            break;
+
+        case MQTT_EVENT_BEFORE_CONNECT: 
+            break;
+
+        default:
+            ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+            break;
+    }
+    return ESP_OK;
+}
 
 /**
  * @brief MQTT事件处理分发函数
@@ -74,6 +141,10 @@ mqtt_state_t get_mqtt_status()
  * @param event_id 事件ID
  * @param event_data 事件数据
  */
+static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
+    ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRId32, base, event_id);
+    mqtt_event_handler_cb(event_data);
+}
 
 /**
  * @brief 初始化MQTT客户端
