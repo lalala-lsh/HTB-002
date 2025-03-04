@@ -201,6 +201,22 @@ void udp_client_init()
  * @param name 表单字段名
  * @param value 表单字段值
  */
+static void add_form_data(char *buffer, size_t *buffer_len, const char *boundary, 
+                          const char *name, const char *value) 
+{
+    // 构建表单字段部分
+    int len = snprintf(NULL, 0, 
+                      "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", 
+                      boundary, name, value);
+    if (*buffer_len + len >= MAX_HTTP_OUTPUT_BUFFER) {
+        ESP_LOGE(TAG, "Buffer overflow when adding form data");
+        return;
+    }
+    snprintf(buffer + *buffer_len, len + 1,
+             "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", 
+             boundary, name, value);
+    *buffer_len += len;
+}
 
 /**
  * @brief 添加文件数据到HTTP多部分表单请求体
@@ -214,6 +230,48 @@ void udp_client_init()
  * @param file_size 文件大小
  * @return esp_err_t ESP_OK表示添加成功，ESP_ERR_NO_MEM表示缓冲区不足
  */
+static esp_err_t add_file_to_multipart(char *buffer, size_t *buffer_len, const char *boundary, 
+                                       const char *name, const char *filename, 
+                                       const uint8_t *file_data, size_t file_size) 
+{
+    // 计算头部长度
+    int header_len = snprintf(NULL, 0, 
+        "--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+        "Content-Type: image/jpeg\r\n\r\n", 
+        boundary, name, filename);
+    
+    // 计算尾部长度
+    const int tail_len = 2;  // \r\n
+    
+    // 计算总需要的长度
+    size_t total_needed = header_len + file_size + tail_len;
+    
+    // 检查缓冲区是否足够
+    if (*buffer_len + total_needed >= MAX_HTTP_OUTPUT_BUFFER) {
+        ESP_LOGE(TAG, "Buffer overflow when adding file: %s (need %zu bytes, available %zu bytes)", 
+                 filename, total_needed, MAX_HTTP_OUTPUT_BUFFER - *buffer_len);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 添加头部
+    *buffer_len += snprintf(buffer + *buffer_len, header_len + 1,
+        "--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+        "Content-Type: image/jpeg\r\n\r\n",
+        boundary, name, filename);
+
+    // 添加文件数据
+    memcpy(buffer + *buffer_len, file_data, file_size);
+    *buffer_len += file_size;
+
+    // 添加尾部
+    memcpy(buffer + *buffer_len, "\r\n", tail_len);
+    *buffer_len += tail_len;
+
+    ESP_LOGI(TAG, "Successfully added file: %s, size: %zu, current buffer length: %zu", 
+             filename, file_size, *buffer_len);
+    
+    return ESP_OK;
+}
 
 /**
  * @brief HTTP客户端事件处理回调
@@ -223,6 +281,37 @@ void udp_client_init()
  * @param evt HTTP客户端事件
  * @return esp_err_t ESP_OK表示处理成功
  */
+static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id) {
+        case HTTP_EVENT_ERROR:
+            // 当执行过程中出现任何错误时，会发生此事件 
+            ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+            break;
+        case HTTP_EVENT_ON_CONNECTED:
+            // 一旦 HTTP 连接到服务器，就不会执行任何数据交换
+            break;
+        case HTTP_EVENT_HEADER_SENT:
+            // 将所有标头发送到服务器后发生此事件
+            break;
+        case HTTP_EVENT_ON_HEADER:
+            // 在接收从服务器发送的每个标头时发生
+            break;
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            // 在此处理HTTP请求返回的数据
+            break;
+        case HTTP_EVENT_ON_FINISH:
+            // 完成 HTTP 会话时发生
+            break;
+        case HTTP_EVENT_DISCONNECTED:
+            // 连接断开时发生此事件
+            break;
+        default:
+            break;
+    }
+    return ESP_OK;
+}
 
 /**
  * @brief 发送HTTP multipart/form-data请求上传多个图像文件
@@ -236,6 +325,162 @@ void udp_client_init()
  * @param file_sizes 文件大小数组
  * @return esp_err_t ESP_OK表示上传成功，ESP_FAIL表示上传失败
  */
+esp_err_t http_post_multipart(const char *url, const char *device_sn, int ucode, 
+                              const uint8_t **img_files, const char **filenames, 
+                              size_t img_count, const size_t *file_sizes) 
+{
+    if (!img_files || !filenames || !file_sizes || img_count == 0) {
+        ESP_LOGE(TAG, "Invalid parameters for HTTP post");
+        return ESP_FAIL;
+    }
+
+    // 初始化HTTP客户端配置
+    esp_http_client_config_t config = {
+        .url = url,
+#if ON_LINE_SERVER
+        .transport_type = HTTP_TRANSPORT_OVER_SSL, 
+#else
+        .transport_type = HTTP_TRANSPORT_OVER_TCP,  
+#endif
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        return ESP_FAIL;
+    }
+
+    // 设置HTTP方法为POST
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+
+    // 创建boundary
+    char boundary[32];
+    snprintf(boundary, sizeof(boundary), "------------------------%lx", esp_random());
+
+    // 设置Content-Type header
+    char content_type[64];
+    snprintf(content_type, sizeof(content_type), "multipart/form-data; boundary=%s", boundary);
+    esp_http_client_set_header(client, "Content-Type", content_type);
+
+    // 优先使用PSRAM分配请求体缓冲区以节省内部内存
+    char* buffer = NULL;
+#if CONFIG_SPIRAM_BOOT_INIT
+    buffer = heap_caps_malloc(MAX_HTTP_OUTPUT_BUFFER, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    if (!buffer) {
+        // PSRAM分配失败时回退到内部内存
+        buffer = malloc(MAX_HTTP_OUTPUT_BUFFER);
+    }
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate memory for buffer (both PSRAM and internal RAM)");
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Allocated %d bytes for HTTP buffer (%s)", MAX_HTTP_OUTPUT_BUFFER,
+             heap_caps_get_allocated_size(buffer) ? "PSRAM" : "Internal RAM");
+    size_t buffer_len = 0;
+
+    // 添加设备序列号字段
+    add_form_data(buffer, &buffer_len, boundary, "device_sn", device_sn);
+
+    // 添加用户码字段（转换为字符串）
+    char ucode_str[16];
+    snprintf(ucode_str, sizeof(ucode_str), "%d", ucode);
+    add_form_data(buffer, &buffer_len, boundary, "ucode", ucode_str);
+
+    // 预估所需缓冲区大小并智能调整文件数量
+    size_t estimated_size = buffer_len;  // 当前已用空间（表单字段）
+    size_t actual_files_to_upload = 0;
+    
+    // 预估每个文件需要的空间（文件数据 + multipart头部，约150字节开销）
+    for (size_t i = 0; i < img_count; i++) {
+        if (img_files[i] && filenames[i]) {
+            size_t file_overhead = 150 + strlen(filenames[i]);  // multipart头部开销
+            size_t file_total_size = file_sizes[i] + file_overhead;
+            
+            if (estimated_size + file_total_size + 100 < MAX_HTTP_OUTPUT_BUFFER) {  // 预留100字节安全边际
+                estimated_size += file_total_size;
+                actual_files_to_upload++;
+            } else {
+                ESP_LOGW(TAG, "达到缓冲区容量限制，实际上传文件数: %zu/%zu", actual_files_to_upload, img_count);
+                break;
+            }
+        }
+    }
+    
+    ESP_LOGI(TAG, "预估缓冲区使用: %zu/%d 字节，计划上传文件: %zu", 
+             estimated_size, MAX_HTTP_OUTPUT_BUFFER, actual_files_to_upload);
+
+    // 添加图像文件（仅添加预估范围内的文件）
+    int successful_files = 0;
+    for (size_t i = 0; i < actual_files_to_upload && i < img_count; i++) {
+        if (img_files[i] && filenames[i]) {
+            ESP_LOGI(TAG, "Adding file %zu/%zu: %s, size: %zu", 
+                     i+1, actual_files_to_upload, filenames[i], file_sizes[i]);
+            
+            esp_err_t ret = add_file_to_multipart(buffer, &buffer_len, boundary, "imgs[]", 
+                                                filenames[i], img_files[i], file_sizes[i]);
+            if (ret == ESP_OK) {
+                successful_files++;
+            } else {
+                ESP_LOGW(TAG, "缓冲区空间不足，停止添加文件。当前已添加: %d/%zu", successful_files, actual_files_to_upload);
+                break;  // 如果缓冲区已满，停止添加更多文件
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "Successfully added %d/%zu files to request", successful_files, img_count);
+
+    // 添加结束边界
+    char end_boundary[64];
+    snprintf(end_boundary, sizeof(end_boundary), "\r\n--%s--\r\n", boundary);
+    size_t end_len = strlen(end_boundary);
+    
+    if (buffer_len + end_len < MAX_HTTP_OUTPUT_BUFFER) {
+        memcpy(buffer + buffer_len, end_boundary, end_len);
+        buffer_len += end_len;
+
+        // 设置POST字段
+        esp_http_client_set_post_field(client, buffer, buffer_len);
+
+        // 执行HTTP请求
+        esp_err_t err = esp_http_client_perform(client);
+        esp_err_t result = ESP_FAIL;  // 默认为失败
+        
+        if (err == ESP_OK) {
+            int status_code = esp_http_client_get_status_code(client);
+            if (status_code == 200) {
+                ESP_LOGI(TAG, "Files uploaded successfully");
+                result = ESP_OK;  // 只有在HTTP状态码为200时才认为成功
+            } else {
+                ESP_LOGE(TAG, "Server returned status code: %d", status_code);
+                result = ESP_FAIL;
+            }
+        } else {
+            ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+            result = ESP_FAIL;
+        }
+        
+        // 清理资源
+        free(buffer);
+        esp_http_client_cleanup(client);
+        
+        // 添加更长延迟确保HTTP客户端完全清理，防止SSL与MQTT冲突
+        ESP_LOGW(TAG, "HTTP客户端清理完成，等待SSL上下文完全释放...");
+        vTaskDelay(pdMS_TO_TICKS(500));  // 增加到500ms
+        return result;
+    } else {
+        ESP_LOGE(TAG, "Buffer overflow when adding end boundary");
+        // 清理资源
+        free(buffer);
+        esp_http_client_cleanup(client);
+        
+        // 添加更长延迟确保HTTP客户端完全清理，防止SSL与MQTT冲突
+        ESP_LOGW(TAG, "HTTP客户端清理完成，等待SSL上下文完全释放...");
+        vTaskDelay(pdMS_TO_TICKS(500));  // 增加到500ms
+        return ESP_FAIL;
+    }
+}
 
 // 全局上传状态标志
 static bool g_is_uploading = false;
