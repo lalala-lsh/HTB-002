@@ -490,7 +490,40 @@ typedef struct {
     int ucode;
 } upload_task_params_t;
 
+static bool stop_mqtt_for_upload(void)
+{
+    bool stopped = false;
+    set_mqtt_heartbeat_pause(true);
 
+    esp_mqtt_client_handle_t client = get_mqtt_client();
+    if (client != NULL && get_mqtt_status() == MQTT_EVENT_CONNECTED_) {
+        esp_err_t ret = esp_mqtt_client_stop(client);
+        if (ret == ESP_OK) {
+            stopped = true;
+            ESP_LOGI(TAG, "MQTT已停止，避免上传期间SSL冲突");
+        } else {
+            ESP_LOGW(TAG, "MQTT停止失败: %s", esp_err_to_name(ret));
+        }
+    }
+
+    return stopped;
+}
+
+static void resume_mqtt_after_upload(bool mqtt_stopped)
+{
+    if (mqtt_stopped) {
+        esp_mqtt_client_handle_t client = get_mqtt_client();
+        if (client != NULL) {
+            esp_err_t ret = esp_mqtt_client_start(client);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "MQTT重启失败: %s", esp_err_to_name(ret));
+            } else {
+                ESP_LOGI(TAG, "MQTT已重启");
+            }
+        }
+    }
+    set_mqtt_heartbeat_pause(false);
+}
 
 
 /**
