@@ -89,6 +89,45 @@ void getVersion(char* version)
  * @param event_id 事件ID
  * @param event_data 事件数据
  */
+static void event_handler(void* arg, esp_event_base_t event_base,
+                          int32_t event_id, void* event_data)
+{
+    if (event_base == ESP_HTTPS_OTA_EVENT) {
+        switch (event_id) {
+            case ESP_HTTPS_OTA_START:
+                ESP_LOGI(TAG, "OTA started");
+                ota_status = OTA_STATUS_ING;
+               
+                break;
+            case ESP_HTTPS_OTA_CONNECTED:
+                ESP_LOGI(TAG, "Connected to server");
+                break;
+            case ESP_HTTPS_OTA_GET_IMG_DESC:
+                ESP_LOGI(TAG, "Reading Image Description");
+                break;
+            case ESP_HTTPS_OTA_VERIFY_CHIP_ID:
+                ESP_LOGI(TAG, "Verifying chip id of new image: %d", *(esp_chip_id_t *)event_data);
+                break;
+            case ESP_HTTPS_OTA_DECRYPT_CB:
+                ESP_LOGI(TAG, "Callback to decrypt function");
+                break;
+            case ESP_HTTPS_OTA_WRITE_FLASH:
+                ESP_LOGD(TAG, "Writing to flash: %d written", *(int *)event_data);
+                break;
+            case ESP_HTTPS_OTA_UPDATE_BOOT_PARTITION:
+                ESP_LOGI(TAG, "Boot partition updated. Next Partition: %d", *(esp_partition_subtype_t *)event_data);
+                break;
+            case ESP_HTTPS_OTA_FINISH:
+                ESP_LOGI(TAG, "OTA finish");
+                ota_status = OTA_STATUS_SUCCESS;
+                break;
+            case ESP_HTTPS_OTA_ABORT: // OTA升级过程中断
+                ESP_LOGI(TAG, "OTA abort");
+                ota_status = OTA_STATUS_FAIL;
+                break;
+        }
+    }
+}
 
 /**
  * @brief 验证固件头部信息
@@ -98,6 +137,52 @@ void getVersion(char* version)
  * @param new_app_info 新固件的应用信息描述符
  * @return esp_err_t ESP_OK表示验证通过，ESP_FAIL表示验证失败
  */
+static esp_err_t validate_image_header(esp_app_desc_t *new_app_info)
+{
+    if (new_app_info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 获取当前运行的固件版本信息
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_app_desc_t running_app_info;
+    if (esp_ota_get_partition_description(running, &running_app_info) == ESP_OK) {
+        ESP_LOGI(TAG, "Running firmware version: %s", running_app_info.version);
+    }
+
+    // 版本检查：如果新固件版本与当前运行版本相同或更旧，则不升级
+#ifdef CONFIG_EXAMPLE_SKIP_VERSION_CHECK
+    ESP_LOGI(TAG, "获取的固件版本:%s; 设备的运行版本：%s", new_app_info->version, running_app_info.version);
+    if (memcmp(new_app_info->version, running_app_info.version, sizeof(new_app_info->version)) == 0) {
+        ESP_LOGW(TAG, "Current running version is the same as a new. We will not continue the update.");
+        return ESP_FAIL;
+    }
+    
+    // 简单的版本比较检查（防止版本回退）
+    if (strcmp(new_app_info->version, running_app_info.version) < 0) {
+        ESP_LOGW(TAG, "New version (%s) is older than running version (%s). Rollback not allowed.", 
+                 new_app_info->version, running_app_info.version);
+        return ESP_FAIL;
+    }
+#endif
+
+    // 安全版本检查，防止固件回滚
+#ifdef CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK
+    /**
+     * Secure version check from firmware image header prevents subsequent download and flash write of
+     * entire firmware image. However this is optional because it is also taken care in API
+     * esp_https_ota_finish at the end of OTA update procedure.
+     */
+    const uint32_t hw_sec_version = esp_efuse_read_secure_version();
+    if (new_app_info->secure_version < hw_sec_version) {
+        ESP_LOGW(TAG, "New firmware security version is less than eFuse programmed, %"PRIu32" < %"PRIu32, 
+                new_app_info->secure_version, hw_sec_version);
+        return ESP_FAIL;
+    }
+#endif
+
+    return ESP_OK;
+}
 
 /**
  * @brief HTTP客户端初始化回调函数
@@ -107,6 +192,21 @@ void getVersion(char* version)
  * @param http_client HTTP客户端句柄
  * @return esp_err_t ESP_OK表示初始化成功
  */
+static esp_err_t _http_client_init_cb(esp_http_client_handle_t http_client)
+{
+    esp_err_t err = ESP_OK;
+    /* 如需添加自定义HTTP请求头，可取消下面的注释 */
+    // err = esp_http_client_set_header(http_client, "Custom-Header", "Value");
+    
+    // 添加User-Agent头，某些服务器可能需要
+    esp_http_client_set_header(http_client, "User-Agent", "ESP32-OTA/1.0");
+    
+    // 设置连接保持活跃
+    esp_http_client_set_header(http_client, "Connection", "keep-alive");
+    
+    ESP_LOGI(TAG, "HTTP客户端初始化完成");
+    return err;
+}
 
 /**
  * @brief OTA升级任务函数

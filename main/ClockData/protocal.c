@@ -348,9 +348,108 @@ void build_changemode(esp_mqtt_client_handle_t client, int level, char * rid)
 // }
 
 
+static bool is_boot_ota_reply(cJSON *root)
+{
+	if (!s_boot_ota_waiting) {
+		return false;
+	}
 
+	cJSON *rid = cJSON_GetObjectItem(root, "RID");
+	if (rid && rid->valuestring && s_boot_version_rid[0] != '\0') {
+		return strcmp(rid->valuestring, s_boot_version_rid) == 0;
+	}
+
+	int64_t now_ms = esp_timer_get_time() / 1000;
+	return (now_ms - s_boot_version_send_time_ms) <= BOOT_OTA_REPLY_WINDOW_MS;
+}
+
+static void close_boot_ota_window(void)
+{
+	s_boot_ota_waiting = false;
+	s_boot_version_rid[0] = '\0';
+	s_boot_version_send_time_ms = 0;
+}
 
 // 版本号上传
+void build_versionmessage(esp_mqtt_client_handle_t client)
+{
+	if (s_boot_version_sent) {
+		ESP_LOGI(TAG, "开机版本同步已发送过，跳过本次MQTT重连版本上报");
+		return;
+	}
+
+    if (client != NULL)
+    {
+        char rid[30];
+        time_t rawtime;
+        uint64_t current_time_ms = esp_timer_get_time()/1000;
+        int ms_pre = current_time_ms%1000;
+        snprintf(rid, 30, "%s%lld%d", c_user_data, time(&rawtime), ms_pre);
+
+        cJSON *root = NULL;
+        root = cJSON_CreateObject();
+
+        // 创建PARAMS对象
+        cJSON *params = cJSON_CreateObject();
+        
+        // 添加普通整型参数
+        for(int i=0; i<DEVICE_PARA_MAX; i++){
+			if (i == DEVICE_PARA_UDP_IP) //UDP IP参数
+			{
+				char* ip = get_udp_ip();
+				if (ip != NULL) {
+					cJSON_AddStringToObject(params, server_keys[DEVICE_PARA_UDP_IP], ip);
+				}
+			}else if(i == DEVICE_PARA_PICTURE) continue; //跳过图片参数
+			else{
+				int device_para;
+				device_para = get_device_para(i);
+				cJSON_AddNumberToObject(params, server_keys[i], device_para);
+			} 
+            
+        }
+        
+        // 单独处理UDP IP地址
+        
+
+        uint8_t base_mac_[6];
+        char mac_str[18];
+        esp_efuse_mac_get_default(base_mac_);
+        base_mac_[5] += 2; // 最后一位加2
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X", 
+            base_mac_[0], base_mac_[1], base_mac_[2], 
+            base_mac_[3], base_mac_[4], base_mac_[5]);
+        cJSON_AddNumberToObject(root, "CMD", CMD_PROTOCAL_VERSION);
+        cJSON_AddStringToObject(root, "VERSION", device_version);
+        cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+        cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+        cJSON_AddStringToObject(root, "DEVICE_MAC", mac_str);
+        cJSON_AddNumberToObject(root, "DEVICE_TIME", time(NULL));
+        cJSON_AddItemToObject(root, "PARAMS", params);
+        cJSON_AddStringToObject(root, "RID", rid);
+
+        char * String = NULL;
+        String = cJSON_PrintUnformatted(root);
+        
+        // 打印JSON字符串
+        ESP_LOGI(TAG, "JSON Message: %s", String);
+
+        int msg_id;
+		(void)msg_id;
+		msg_id = esp_mqtt_client_publish(client, push_topic, String, strlen(String), 0, 0);
+		ESP_LOGI(TAG, "版本号信息发送成功, VersionMessage=%s, msg_id=%d", device_version, msg_id);
+		if (msg_id != -1) {
+			s_boot_version_sent = true;
+			s_boot_ota_waiting = true;
+			strncpy(s_boot_version_rid, rid, sizeof(s_boot_version_rid) - 1);
+			s_boot_version_rid[sizeof(s_boot_version_rid) - 1] = '\0';
+			s_boot_version_send_time_ms = current_time_ms;
+			s_version_sync_key_status = key_get_status();
+		}
+        cJSON_free(String);
+        cJSON_Delete(root);
+    }
+}
 
 
 
