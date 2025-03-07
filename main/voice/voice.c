@@ -228,6 +228,19 @@ static void voice_task(void* arg)
     
     while(true) {
         if(xQueueReceive(voice_evt_queue, &cmd, portMAX_DELAY)) {
+            // 检查队列中是否有其他命令待处理
+            int queue_length = uxQueueMessagesWaiting(voice_evt_queue);
+            
+            // OTA相关命令强制播放，不受队列长度限制
+            bool is_ota_cmd = is_cmd_in_group(cmd, OTA_CMDS, sizeof(OTA_CMDS));
+            
+            if (queue_length != 0 && !is_ota_cmd) {
+                ESP_LOGI(TAG, "消息队列剩余消息：%d, 跳过执行该条", queue_length);
+                continue;
+            } else if (is_ota_cmd) {
+                ESP_LOGI(TAG, "OTA语音命令0x%x强制播放，队列剩余消息：%d", cmd, queue_length);
+            }
+            
             WELCOME_flag = true;
             
 #if DEBUG_
