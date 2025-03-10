@@ -114,6 +114,27 @@ void stop_background_music(void)
  * @param voice_cmd 刚播放完的语音命令
  * @param delay_ms 语音播放延时（毫秒），用于等待语音播放完成
  */
+static void handle_voice_music_recovery(uint8_t voice_cmd, uint32_t delay_ms)
+{
+    // 等待语音播放完成
+    vTaskDelay(delay_ms / portTICK_PERIOD_MS);
+    
+    uint8_t current_feed_status = feed_set_status();
+    uint8_t current_heat_status = heat_set_status();
+    
+    // 在训练模式下，任何语音播放后都需要恢复背景音乐
+    if(current_feed_status == FEED_ING || current_feed_status == BEICI_ING || current_heat_status == 1) {
+        ESP_LOGI(TAG, "训练模式下语音播放后恢复音乐: cmd=0x%x, feed_status=%d, delay=%lums", 
+                 voice_cmd, current_feed_status, delay_ms);
+        music_cycle(); // 使用统一的音乐控制函数
+        return;
+    }
+    
+    // 非训练模式下，确保停止播放
+    ESP_LOGI(TAG, "非训练模式下语音播放后停止: cmd=0x%x, feed_status=%d", 
+             voice_cmd, current_feed_status);
+    Line_2A_WT588F(0xFE); // 停止播放
+}
 
 /**
  * @brief 更新音量设置
