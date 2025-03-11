@@ -93,6 +93,48 @@ static void Line_2A_WT588F(uint8_t data)
  * 
  * 根据设备参数决定是否启用背景音乐
  */
+void music_cycle(void)
+{
+    int bgm_onoff = FUNC_ON;
+    uint8_t current_feed_status = feed_set_status();
+    uint8_t current_key_status = key_get_status();
+
+    bgm_onoff = get_device_para(DEVICE_PARA_BGM);
+    
+    ESP_LOGI(TAG, "music_cycle调用: bgm_onoff=%d, key_status=%d, feed_status=%d, bgm_playing=%d", 
+             bgm_onoff, current_key_status, current_feed_status, bgm_playing);
+    
+    // 修复条件判断：增加训练状态检查，即使按键状态为OFF，如果仍在训练中也应该播放音乐
+    bool should_play_bgm = false;
+    
+    if(bgm_onoff == FUNC_ON && (current_key_status == KEY_FUNC_MODE_1 || current_key_status == KEY_FUNC_MODE_2 || current_key_status == KEY_FUNC_HEAT || current_feed_status != FEED_NONE)) {
+        should_play_bgm = true;
+        ESP_LOGI(TAG, "满足播放条件: bgm_onoff=%d, key_status=%d, feed_status=%d", 
+                 bgm_onoff, current_key_status, current_feed_status);
+    }
+    
+    if(should_play_bgm) {
+        if(!bgm_playing) {
+            drv_music_cycle_commd();
+            bgm_playing = true;
+            ESP_LOGI(TAG, "启动背景音乐循环播放");
+        } else {
+            ESP_LOGI(TAG, "背景音乐状态为播放中，强制重启确保正常播放");
+            drv_music_cycle_commd(); // 强制重新发送命令
+            ESP_LOGI(TAG, "强制重启背景音乐完成");
+        }
+    } else {
+        ESP_LOGI(TAG, "不满足播放条件或已关闭BGM");
+        if(bgm_playing) {
+            Line_2A_WT588F(0xFE); // 关闭BGM
+            esp_rom_delay_us(2000); // 等待停止命令生效
+            // WT588F芯片停止命令可能重置音量，需要重新设置
+            update_volume();
+            bgm_playing = false;
+            ESP_LOGI(TAG, "停止背景音乐播放，已重新设置音量");
+        }
+    }
+}   
 
 /**
  * @brief 强制停止背景音乐
