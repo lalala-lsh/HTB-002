@@ -1143,7 +1143,19 @@ void clear_device_parameters(void)
     memcpy(actualData_device_parameters, initialData_device_parameters, sizeof(actualData_device_parameters));
 }
 
+char* get_udp_ip(void)
+{
+    return udp_ip;
+}
 
+esp_err_t set_udp_ip(const char* ip)
+{
+    if (ip == NULL || strlen(ip) >= sizeof(udp_ip)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strcpy(udp_ip, ip);
+    return ESP_OK;
+}
 
 // RCG_CODE 相关实现
 #define RCG_CODE_SPACENAME "rcg_code_space"
