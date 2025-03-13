@@ -315,6 +315,42 @@ void build_changemode(esp_mqtt_client_handle_t client, int level, char * rid)
 	}
 }
 
+void build_unbind(esp_mqtt_client_handle_t client)
+{
+	if (client != NULL)
+	{
+		char rid[30];
+		time_t rawtime;
+		uint64_t current_time_ms = esp_timer_get_time()/1000;
+		int ms_pre = current_time_ms%1000;
+		snprintf(rid, 30, "%s%ld%d", c_user_data, (long)time(&rawtime), ms_pre);
+
+
+		cJSON *root = NULL;
+		// 创建PARAMS对象
+		// cJSON *params = cJSON_CreateObject();
+		// cJSON_AddStringToObject(params, "VOICE", "ON");
+		// cJSON_AddStringToObject(params, "CAMERA", "ON");
+
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "CMD", CMD_UNBIND);
+		cJSON_AddStringToObject(root, "VERSION", device_version);
+		cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+		cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+		cJSON_AddNumberToObject(root, "DEVICE_TIME", time(NULL));
+
+		cJSON_AddStringToObject(root, "RID", rid);
+
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root);
+		int msg_id;
+		(void)msg_id;
+		msg_id = esp_mqtt_client_publish(client, push_topic, String, strlen(String), 0, 0);
+		ESP_LOGI(TAG, "sent publish successful, unbind, msg_id=%d", msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+	}
+}
 
 // void build_protocalversion(esp_mqtt_client_handle_t client)
 // {
@@ -451,6 +487,59 @@ void build_versionmessage(esp_mqtt_client_handle_t client)
     }
 }
 
+void clear_storage()
+{
+	int32_t fdcount = 0;
+	int32_t rscount = 0;
+	fdcount = check_record_data(RECORD_FD);
+	rscount = check_record_data(RECORD_RS);
+
+	if (fdcount == 0 && rscount == 0) {
+		ESP_LOGI("STORAGE", "无历史数据");
+		return;
+	}
+
+	if(fdcount != 0){
+		for (int32_t i = 0; i < 32; i++) {               
+			if (fdcount & 0x0001) {  								// 后续的处理是针对当天的数据               
+				int32_t nums = get_day_record_data(i, RECORD_FD, databuf); 	// 获取当前的数据条数
+				# if TEST_PRINT
+				printf("get_day_record_data RECORD_FD i =%ld, fdcount = %lx, nums = %ld\n", i, fdcount, nums);
+				for(int j=0; j<nums; j++){ 							// 针对当天的每一条数据进行处理
+					printf("databuf[.]:%s\n", databuf[j]);
+				}
+				# endif
+				(void)nums; // 标记使用，避免警告
+				memset(databuf, 0, sizeof(databuf)); 				// 清空databuf
+				clear_nvs_para_day(i, RECORD_FD);					// 清空flash中当天的数据
+				clear_day_record_data(i, RECORD_FD);				// 修改存储标识符
+			}
+			fdcount = fdcount >> 1;
+		}
+	}
+	if(rscount != 0){
+		for (int32_t i = 0; i < 32; i++) {               
+			if (rscount & 0x0001) {  								// 后续的处理是针对当天的数据               
+				int32_t nums = get_day_record_data(i, RECORD_RS, databuf); 	// 获取当前的数据条数
+				# if TEST_PRINT
+				printf("get_day_record_data RECORD_RS i =%ld, rscount = %lx, nums = %ld\n", i, rscount, nums);
+				for(int j=0; j<nums; j++){ 							// 针对当天的每一条数据进行处理
+					printf("databuf[.]:%s\n", databuf[j]);
+				}
+				# endif
+				(void)nums; // 标记使用，避免警告
+				memset(databuf, 0, sizeof(databuf)); 				// 清空databuf
+				clear_nvs_para_day(i, RECORD_RS);					// 清空flash中当天的数据
+				clear_day_record_data(i, RECORD_RS);				// 修改存储标识符
+			}
+			rscount = rscount >> 1;
+		}
+	}
+
+	# if TEST_PRINT
+	printf("flash存储数据删除完成\n");
+	# endif
+}
 
 
 /* *********************** start：设备参数设置部分 *********************** */

@@ -24,6 +24,62 @@ bool auto_switch = true;
 
 /* 双按键同时按下的判定 */
 esp_timer_handle_t doublePress_timer = NULL;
+static void doublePress_timer_callback(void *arg)
+{
+    if (gpio_get_level(KEY_1_INPUT_IO) == 0 && gpio_get_level(KEY_2_INPUT_IO) == 0)
+    {
+        if (doublePress_count < 3)
+        {
+            doublePress_count++;
+        }
+        else if (doublePress_count >= 3)
+        {
+            doublePress_count = 0;
+            ESP_LOGI("DOUBLE PRESS JUDGE", "restore factory settings");
+            
+            // 1. 先停止所有功能
+            heating_control(FUNC_OFF);  // 关闭加热
+            beici_func_set(FUNC_OFF);   // 关闭彩光
+            feed_func_set(FUNC_OFF);    // 关闭红光
+            dal_40hz_beep_control_switch(0);//关闭蜂鸣器
+
+            
+            // 2. 等待一段时间确保所有功能都已经停止
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // 3. 重置所有设备参数到默认值（只重置前8个参数，跳过UDP_IP和PICTURE）
+            for(int i = 0; i < DEVICE_PARA_MAX-3 ; i++) 
+            {
+                set_device_parameters(i, initialData_device_parameters[i]);
+            }
+            
+            // 4. 更新所有功能的参数
+            update_feed_duty();    // 更新红光强度
+            update_volume();       // 更新音量
+            update_feed_time();    // 更新红光时间
+            update_color_time();   // 更新彩光时间
+            update_heating_time(); // 更新加热时间
+            update_beep_status();  // 更新蜂鸣器状态   
+             
+            
+            // 5. 清除存储数据
+            clear_device_parameters();
+            clear_storage();  // 清除其他存储数据
+            wifi_reset();     // 清除WiFi配置
+            
+            // 6. 设置重置标志
+            reset_flag = 1;
+            
+            // 7. 延时后重启
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_restart();
+        }
+    }
+    else
+    {
+        doublePress_count = 0;
+    }
+}
 
 uint8_t get_reset_flag()
 {
