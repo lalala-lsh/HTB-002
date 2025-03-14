@@ -383,6 +383,20 @@ void build_unbind(esp_mqtt_client_handle_t client)
 // 	}
 // }
 
+void get_status_storagemessage(){
+	int32_t fdcount = 0;
+	int32_t rscount = 0;
+	fdcount = check_record_data(RECORD_FD);
+	rscount = check_record_data(RECORD_RS);
+
+	ESP_LOGI("STORAGE", "=== RECORD_FD = %lx", fdcount);
+	ESP_LOGI("STORAGE", "=== RECORD_RS = %lx", rscount);
+
+	// uint64_t current_time_ms = esp_timer_get_time()/1000;
+	// int ms_pre = current_time_ms%1000;
+	// printf("current_time_ms:%llu\n", current_time_ms);
+	// printf("ms_pre:%d\n", ms_pre);
+}
 
 static bool is_boot_ota_reply(cJSON *root)
 {
@@ -541,6 +555,144 @@ void clear_storage()
 	# endif
 }
 
+void build_storagemessage(esp_mqtt_client_handle_t client)
+{
+	int32_t fdcount = 0;
+	int32_t rscount = 0;
+	fdcount = check_record_data(RECORD_FD);
+	rscount = check_record_data(RECORD_RS);
+
+	ESP_LOGI("STORAGE", "fdcount = %ld", fdcount);
+	ESP_LOGI("STORAGE", "rscount = %ld", rscount);
+
+	if (fdcount == 0 && rscount == 0) {
+		ESP_LOGI("STORAGE", "Flash中无历史数据");
+		return;
+	}
+
+	ESP_LOGI("STORAGE", "&&& RECORD_FD havedata = %lx\n", fdcount);
+	ESP_LOGI("STORAGE", "&&& RECORD_RS havedata = %lx\n", rscount);
+
+	cJSON *root = NULL;
+	root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "CMD", CMD_STORAGE_MESSAGE);
+    cJSON_AddStringToObject(root, "VERSION", device_version);
+    cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+    cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+	// cJSON_AddNumberToObject(root, "DEVICE_MODE_ID", RECORD_FD);
+	cJSON *ArrayJson  = NULL;
+	ArrayJson  = cJSON_CreateArray();
+	cJSON *ArrayFlagJson  = NULL;
+	ArrayFlagJson = cJSON_CreateArray();
+
+	if(fdcount != 0){
+		int32_t nums = 0;
+		int total = 0;
+		for (int32_t i = 0; i < 32; i++) {               
+			if (fdcount & 0x0001) {                    
+				nums = get_day_record_data(i, RECORD_FD, databuf);
+				# if TEST_PRINT
+				printf("get_day_record_data RECORD_FD i =%ld, fdcount = %lx, nums = %ld\n", i, fdcount, nums);
+				# endif
+				for(int j=0; j<nums; j++){
+					// printf("databuf[.]:%s\n", databuf[j]);
+					cJSON *item = cJSON_CreateString(databuf[j]);
+					cJSON_AddItemToArray(ArrayJson, item);
+				}
+				memset(databuf, 0, sizeof(databuf)); // 清空databuf
+				cJSON_AddItemToArray(ArrayFlagJson, cJSON_CreateNumber(i));
+				// clear_nvs_para_day(i, RECORD_FD);
+				// printf("clear fd nvs\n");
+				total += nums;
+			}
+
+			fdcount = fdcount >> 1;
+			if (total > 10) {
+				break;
+			}
+		}
+		cJSON_AddNumberToObject(root, "DEVICE_MODE_ID", RECORD_FD);
+		cJSON_AddItemToObject(root, "DAY_FLAG", ArrayFlagJson);
+		cJSON_AddItemToObject(root, "HISTORY", ArrayJson);
+		if (cJSON_GetArraySize(ArrayJson) == 0) {
+			ESP_LOGW("STORAGE", "HISTORY empty, skip upload");
+			cJSON_Delete(root);
+			return;
+		}
+
+		char rid[30];
+		time_t rawtime;
+		uint64_t current_time_ms = esp_timer_get_time()/1000;
+		int ms_pre = current_time_ms%1000;
+		snprintf(rid, 30, "%s%ld%d", c_user_data, (long)time(&rawtime), ms_pre);
+		cJSON_AddStringToObject(root, "RID", rid);
+
+		/* MQTT上传 */
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root); 
+		ESP_LOGI("STORAGE", "哺光历史数据上传:%s\n", String);
+		int msg_id = esp_mqtt_client_publish((esp_mqtt_client_handle_t )client, push_topic, String, strlen(String), 1, 0);
+		ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+		return;
+	}
+	
+
+	if(rscount != 0){
+		int32_t nums = 0;
+		int total = 0;
+		for (int32_t i = 0; i < 32; i++) {               
+			if (rscount & 0x0001) {                    
+				nums = get_day_record_data(i, RECORD_RS, databuf);
+				# if TEST_PRINT
+				printf("get_day_record_data RECORD_FD i =%ld, rscount = %lx, nums = %ld\n", i, fdcount, nums);
+				# endif
+				for(int j=0; j<nums; j++){
+					cJSON *item = cJSON_CreateString(databuf[j]);
+					cJSON_AddItemToArray(ArrayJson, item);
+				}
+				memset(databuf, 0, sizeof(databuf)); // 清空databuf
+				cJSON_AddItemToArray(ArrayFlagJson, cJSON_CreateNumber(i));
+				// clear_nvs_para_day(i, RECORD_RS);
+				// printf("clear rs nvs\n");
+				total += nums;
+			}
+			
+			rscount = rscount >> 1;
+			if (total > 10) {
+				break;
+			}
+		}
+		cJSON_AddNumberToObject(root, "DEVICE_MODE_ID", RECORD_RS);
+		cJSON_AddItemToObject(root, "DAY_FLAG", ArrayFlagJson);
+		cJSON_AddItemToObject(root, "HISTORY", ArrayJson);
+		if (cJSON_GetArraySize(ArrayJson) == 0) {
+			ESP_LOGW("STORAGE", "HISTORY empty, skip upload");
+			cJSON_Delete(root);
+			return;
+		}
+
+		char rid[30];
+		time_t rawtime;
+		snprintf(rid, 30, "%s%ld", c_user_data, (long)time(&rawtime));
+		cJSON_AddStringToObject(root, "RID", rid);
+
+		/* MQTT上传 */
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root); 
+		// printf("String:%s\n", String);
+		int msg_id = esp_mqtt_client_publish((esp_mqtt_client_handle_t )client, push_topic, String, strlen(String), 0, 0);
+		ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+		return;
+	}
+	cJSON_AddNumberToObject(root, "DEVICE_MODE_ID", RECORD_RS);
+	cJSON_AddItemToObject(root, "DAY_FLAG", ArrayFlagJson);
+	cJSON_AddItemToObject(root, "HISTORY", ArrayJson);
+
+}
 
 /* *********************** start：设备参数设置部分 *********************** */
 
