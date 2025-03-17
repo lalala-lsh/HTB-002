@@ -734,6 +734,447 @@ typedef struct {
 } server_upload_params_t;
 
 
+void process_msg(esp_mqtt_client_handle_t client, char * msg, int msg_len)
+{
+	if (client != NULL)
+	{
+		cJSON* root = cJSON_Parse(msg);
+		if (!root) {
+			ESP_LOGE("STORAGE", "Error before: [%s]", cJSON_GetErrorPtr());
+			return;
+		}
+
+		// 获取json对象的值
+		cJSON* CMD = cJSON_GetObjectItem(root, "CMD");
+		cJSON* RID = cJSON_GetObjectItem(root, "RID");
+		
+		//设备状态--标记 该需求是否需要  用于上传当前训练状态
+		if (CMD->valueint == 200)
+		{
+			int level =  key_get_status();
+			build_changemode(client, level, RID->valuestring);
+		}
+		else if (CMD->valueint == 105) //unbind ack
+		{
+			cJSON* CODE = cJSON_GetObjectItem(root, "RES_CODE");
+			
+			if (strcmp(CODE->valuestring, "SUCCESS") == 0)
+			{
+				//处理完全解绑 (RID)
+			}
+		}
+		else if (CMD->valueint == 103) //哺光上报回复
+		{
+			ESP_LOGI("STORAGE", "收到哺光上报回复");
+			cJSON* res_code = cJSON_GetObjectItem(root, "RES_CODE");
+			
+			char *out = cJSON_Print(root);
+			cJSON_free(out);
+			
+			if (strcmp(res_code->valuestring, "SUCCESS") == 0)
+			{
+				ESP_LOGI("STORAGE", "哺光上报回复的结果是成功，RES_CODE = SUCCESS");
+				
+				// 检查是否有待上传的图片
+				if (pending_rcg_code > 0) {
+					ESP_LOGI("STORAGE", "开始上传RCG_CODE为 %lu 的图片", pending_rcg_code);
+					
+					// 检查是否有对应的图片文件
+					char file_paths[10][272]; // MAX_TEMP_IMAGES = 10
+					int image_count = get_images_by_rcg_code(pending_rcg_code, file_paths, 10);
+					
+					if (image_count > 0) {
+						ESP_LOGI(TAG, "找到 %d 张图片，开始上传", image_count);
+						esp_err_t ret = start_upload_pictures_async(pending_rcg_code);
+						if (ret == ESP_OK) {
+							ESP_LOGI(TAG, "图片上传任务已启动");
+							// 任务已启动，清除待上传标记
+							pending_rcg_code = 0;
+						} else {
+							ESP_LOGE(TAG, "图片上传任务启动失败，错误码: %d", ret);
+						}
+					} else {
+						ESP_LOGI(TAG, "未找到对应的图片文件");
+						// 没有图片可上传，清除待上传标记
+						pending_rcg_code = 0;
+					}
+				} else {
+					ESP_LOGI("STORAGE", "没有待上传的图片");
+				}
+			} else {
+				ESP_LOGI("STORAGE", "哺光上报失败，不上传图片");
+				// 清除待上传的RCG_CODE
+				pending_rcg_code = 0;
+			}
+		}
+		else if (CMD->valueint == 101) //批量上报回复
+		{
+			ESP_LOGI("STORAGE", "收到批量上报回复");
+			cJSON* res_code = cJSON_GetObjectItem(root, "RES_CODE");
+			
+			char *out = cJSON_Print(root);
+			free(out);
+			
+			if (strcmp(res_code->valuestring, "SUCCESS") == 0)
+			{
+				ESP_LOGI("STORAGE", "批量上报回复的结果是成功，RES_CODE = SUCCESS");
+				
+				cJSON* arr_day_flag = cJSON_GetObjectItem(root, "DAY_FLAG");
+				cJSON* dev_mode_id = cJSON_GetObjectItem(root, "DEVICE_MODE_ID");
+				
+				// 如果是哺光训练数据(RECORD_FD=1)，需要在清理数据前先上传对应的图片
+				if (dev_mode_id && dev_mode_id->valueint == 1) {
+					ESP_LOGI("STORAGE", "检查哺光训练历史数据对应的图片");
+					
+					// 检查是否已有图片上传任务在运行
+					if (image_upload_task_handle != NULL) {
+						ESP_LOGW(TAG, "图片上传任务已在运行，跳过本次上传");
+					} else {
+						// 创建参数结构
+						image_upload_params_t* params = malloc(sizeof(image_upload_params_t));
+						if (params) {
+							// 深拷贝day_flags JSON数组
+							params->day_flags = cJSON_Duplicate(arr_day_flag, 1);
+							params->device_mode_id = dev_mode_id->valueint;
+							
+							// 创建独立的图片上传任务，避免在MQTT任务中进行耗时操作
+							BaseType_t ret = xTaskCreate(
+								image_upload_task,
+								"image_upload",
+								8192,  // 栈大小
+								params,
+								5,     // 优先级
+								&image_upload_task_handle
+							);
+							
+							if (ret != pdPASS) {
+								ESP_LOGE(TAG, "创建图片上传任务失败");
+								if (params->day_flags) cJSON_Delete(params->day_flags);
+								free(params);
+							} else {
+								ESP_LOGI(TAG, "图片上传任务创建成功");
+							}
+						} else {
+							ESP_LOGE(TAG, "分配图片上传参数内存失败");
+						}
+					}
+				}
+				
+				int day_flag_size = cJSON_GetArraySize(arr_day_flag);
+
+				for (int i = 0; i < day_flag_size; i++) {
+					// ESP_LOGI("STORAGE", "DAY_FLAG: %d", cJSON_GetArrayItem(arr_day_flag, i)->valueint);
+					cJSON *item = cJSON_GetArrayItem(arr_day_flag, i);
+					clear_nvs_para_day(item->valueint, dev_mode_id->valueint); // clear_nvs_para_day(i, RECORD_FD);
+					clear_day_record_data(item->valueint, dev_mode_id->valueint);
+				}
+				ESP_LOGI("STORAGE", "DEVICE_MODE_ID: %d", dev_mode_id->valueint);
+
+				build_storagemessage(client);
+			}
+		}
+
+		// 106：版本更新回复，调用 OTA 拉取 bin 文件
+		else if(CMD->valueint == 106){
+			if (!is_boot_ota_reply(root)) {
+				ESP_LOGI("OTA", "收到非开机版本同步的OTA回复，忽略本次升级消息");
+				cJSON_Delete(root);
+				return;
+			}
+			close_boot_ota_window();
+
+			KEY_FUNC_E current_key_status = key_get_status();
+			if (s_version_sync_key_status != KEY_FUNC_OFF || current_key_status != KEY_FUNC_OFF) {
+				ESP_LOGI("OTA", "版本同步时或当前设备处于工作状态，跳过OTA升级(sync:%d, current:%d)",
+						 s_version_sync_key_status, current_key_status);
+				cJSON_Delete(root);
+				return;
+			}
+
+			cJSON* res_code = cJSON_GetObjectItem(root, "RES_CODE");
+			
+			char *out = cJSON_Print(root);
+			free(out);
+			
+			if (strcmp(res_code->valuestring, "SUCCESS") == 0)
+			{
+				ESP_LOGI("STORAGE", "RES_CODE = SUCCESS\n");
+				
+				cJSON* package = cJSON_GetObjectItem(root, "PACKAGE");
+				char* str_package = package->valuestring;
+				# if TEST_PRINT
+				printf("PACKAGE: %s\n", str_package);
+				printf("packpage_status:%d\n", strcmp(str_package, ""));
+				# endif
+
+				if (strcmp(str_package, "") != 0){
+					ESP_LOGI("OTA", "执行OTA升级程序");
+
+					// 发送语音指令
+					
+					play_voice(OTA_START); // 播放升级失败提示音
+					vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+					OTA_function(str_package);
+				} else {
+					ESP_LOGI("OTA","当前已经是最新版本，无需升级");
+				}
+			}
+		}
+
+		// 201：设备蓝牙控制
+		else if(CMD->valueint == 201){
+			char *out = cJSON_Print(root);
+			free(out);
+
+			cJSON* JSON_duration = cJSON_GetObjectItem(root, "DURATION");
+			int duration = JSON_duration->valueint;
+
+			// 打开蓝牙广播
+       	 	mine_esp_blufi_adv_start();    
+
+			// 开一个软件定时器
+			const esp_timer_create_args_t periodic_timer_args = {
+				.callback = &periodic_timer_callback,
+				.name = "periodic" /* name is optional, but may help identify the timer when debugging */
+			};
+
+			ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));/* The timer has been created but is not running yet */
+			// ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer,1*1000*1000)); // 定时器初始单位为us
+			
+			ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer,duration*1000*1000)); // 定时器初始单位为us
+		}
+
+		// 299：设备自动解绑
+		else if(CMD->valueint == 299){
+			char *out = cJSON_Print(root);
+			free(out);
+
+			cJSON* JSON_unbind_mode = cJSON_GetObjectItem(root, "IS_RETAIN_DATA");
+			int unbind_mode = JSON_unbind_mode->valueint;
+
+			wifi_reset();
+			
+			if(unbind_mode == 0)
+			{
+				clear_storage();
+			}
+			
+			esp_restart();
+		}
+
+		// 209：设备控制参数修改
+		else if(CMD->valueint == 209){
+
+			ESP_LOGI("DEVICE_PARAMETERS", "接收到设备参数设置指令");
+
+			char *out = cJSON_Print(root);
+			free(out);
+
+			// 获取 key
+			cJSON* JSON_set_key = cJSON_GetObjectItem(root, "SET_KEY");
+			char* str_set_key = JSON_set_key->valuestring;
+			// 获取 rid
+			cJSON* JSON_rid = cJSON_GetObjectItem(root, "RID");
+			char* str_rid = JSON_rid->valuestring;
+
+			// 特殊处理logs参数（用于日志上报
+			if (strcmp(str_set_key, "logs") == 0) {
+				cJSON* JSON_set_data = cJSON_GetObjectItem(root, "SET_VALUE");
+				int set_data = (JSON_set_data && cJSON_IsNumber(JSON_set_data)) ? JSON_set_data->valueint : 0;
+
+				ESP_LOGI("DEVICE_PARAMETERS", "收到209日志请求，logs=%d", set_data);
+
+				if (set_data != 1) {
+					ESP_LOGW("DEVICE_PARAMETERS", "logs参数值不为1，忽略");
+					return;
+				}
+
+				// 从NVS读取日志信息（直接回传，不再解析/格式化）
+				char logs_json[2048] = {0};
+				char logs_json_fmt[2048] = {0};
+				esp_err_t ret = get_device_logs_from_nvs(logs_json, sizeof(logs_json));
+				if (ret != ESP_OK || logs_json[0] == '\0') {
+					return;
+				}
+
+				// 仅对字符串数组做换行美化（不改变JSON结构）
+				size_t out_len = 0;
+				for (size_t i = 0; logs_json[i] != '\0' && out_len + 1 < sizeof(logs_json_fmt); i++) {
+					if (logs_json[i] == ',' && logs_json[i + 1] == '\"' &&
+					    out_len + 2 < sizeof(logs_json_fmt)) {
+						logs_json_fmt[out_len++] = ',';
+						logs_json_fmt[out_len++] = '\n';
+						continue;
+					}
+					logs_json_fmt[out_len++] = logs_json[i];
+				}
+				logs_json_fmt[out_len] = '\0';
+
+				esp_mqtt_client_handle_t client = get_mqtt_client();
+				if (client != NULL) {
+					cJSON *reply_root = cJSON_CreateObject();
+					cJSON_AddNumberToObject(reply_root, "CMD", CMD_DEVICE_PARAMETERS_REPLY);
+					cJSON_AddStringToObject(reply_root, "VERSION", device_version);
+					cJSON_AddStringToObject(reply_root, "DEVICE_TYPE", DEVICE_TYPE);
+					cJSON_AddStringToObject(reply_root, "DEVICE_CODE", c_user_data);
+					cJSON_AddNumberToObject(reply_root, "DEVICE_TIME", time(NULL));
+					cJSON_AddStringToObject(reply_root, "SET_KEY", "logs");
+					cJSON_AddStringToObject(reply_root, "SET_VALUE", logs_json_fmt[0] ? logs_json_fmt : logs_json);
+					cJSON_AddStringToObject(reply_root, "RES_CODE", "SUCCESS");
+					cJSON_AddStringToObject(reply_root, "RID", str_rid);
+
+					char *reply_string = cJSON_PrintUnformatted(reply_root);
+					if (reply_string) {
+						ESP_LOGI(TAG, "日志上报回复消息: %s", reply_string);
+						int msg_id = esp_mqtt_client_publish(client, push_topic, reply_string, strlen(reply_string), 0, 0);
+						ESP_LOGI(TAG, "日志上报回复成功, msg_id=%d", msg_id);
+						cJSON_free(reply_string);
+						if (msg_id != -1) {
+							clear_device_logs_from_nvs();
+							ESP_LOGI("DEVICE_PARAMETERS", "日志已清除");
+						}
+					}
+					cJSON_Delete(reply_root);
+				}
+				return;
+			}
+			
+			// 特殊处理ucode参数（用于图片上传）
+			if (strcmp(str_set_key, "ucode") == 0) {
+				cJSON* JSON_set_data = cJSON_GetObjectItem(root, "SET_VALUE");
+				int set_data = JSON_set_data->valueint;
+				
+				ESP_LOGI("DEVICE_PARAMETERS", "收到209上传请求，ucode=%d", set_data);
+				
+				// 检查是否已有服务器上传任务在运行
+				if (server_upload_task_handle != NULL) {
+					ESP_LOGW(TAG, "服务器上传任务已在运行，拒绝新请求");
+					build_device_parameters_process_reply(9, set_data, "BUSY", str_rid);
+					return;
+				}
+				
+				// 创建参数结构
+				server_upload_params_t* params = malloc(sizeof(server_upload_params_t));
+				if (params) {
+					params->ucode = set_data;
+					strncpy(params->rid, str_rid, sizeof(params->rid) - 1);
+					params->rid[sizeof(params->rid) - 1] = '\0';
+					
+					// 创建独立的服务器上传任务，避免在MQTT任务中进行耗时操作
+					BaseType_t ret = xTaskCreate(
+						server_request_upload_task,
+						"server_upload",
+						8192,  // 栈大小
+						params,
+						5,     // 优先级
+						&server_upload_task_handle
+					);
+					
+					if (ret != pdPASS) {
+						ESP_LOGE(TAG, "创建服务器上传任务失败");
+						build_device_parameters_process_reply(9, set_data, "FAIL", str_rid);
+						free(params);
+					} else {
+						ESP_LOGI(TAG, "服务器上传任务创建成功");
+						// 不在这里回复，在任务完成后回复
+					}
+				} else {
+					ESP_LOGE(TAG, "分配服务器上传参数内存失败");
+					build_device_parameters_process_reply(9, set_data, "FAIL", str_rid);
+				}
+				return;
+			}
+			
+			// 特殊处理UDP IP地址
+			if (strcmp(str_set_key, "udp_ip") == 0) {
+				cJSON* JSON_set_data = cJSON_GetObjectItem(root, "SET_VALUE");
+				if (JSON_set_data->type == cJSON_String) {
+					esp_err_t ret = set_udp_ip(JSON_set_data->valuestring);
+					const char* result = (ret == ESP_OK) ? "SUCCESS" : "FAIL";
+					char ip_str[16];
+					snprintf(ip_str, sizeof(ip_str), "%s", JSON_set_data->valuestring);
+					ESP_LOGI(TAG, "设置UDP IP: %s, 结果: %s", ip_str, result);
+					// 这里使用0作为data值，因为实际的IP是字符串
+					build_device_parameters_process_reply(DEVICE_PARA_UDP_IP, 0, result, str_rid);
+				} else {
+					ESP_LOGE(TAG, "UDP IP必须是字符串类型");
+					build_device_parameters_process_reply(DEVICE_PARA_UDP_IP, 0, "FAIL", str_rid);
+				}
+				return;
+			}
+
+			// 特殊处理count_limit租赁次数参数
+			if (strcmp(str_set_key, "count_limit") == 0) {
+				cJSON* JSON_set_value = cJSON_GetObjectItem(root, "SET_VALUE");
+				if (JSON_set_value && cJSON_IsObject(JSON_set_value)) {
+					cJSON* type_item = cJSON_GetObjectItem(JSON_set_value, "type");
+					cJSON* count_item = cJSON_GetObjectItem(JSON_set_value, "count");
+					
+					if (type_item && count_item && 
+						(cJSON_IsString(type_item) || cJSON_IsNumber(type_item)) &&
+						(cJSON_IsString(count_item) || cJSON_IsNumber(count_item))) {
+						
+						int type = cJSON_IsString(type_item) ? atoi(type_item->valuestring) : type_item->valueint;
+						int count = cJSON_IsString(count_item) ? atoi(count_item->valuestring) : count_item->valueint;
+						int final_count = 0;
+						
+						if (type == 1) {
+							// 累加模式：从NVS读取剩余次数，然后进行累加
+							int current_count = get_count_limit();
+							final_count = current_count + count;
+							ESP_LOGI("DEVICE_PARAMETERS", "租赁次数累加: %d + %d = %d", current_count, count, final_count);
+						} else if (type == 2) {
+							// 覆盖模式：直接覆盖NVS中的剩余次数
+							final_count = count;
+							ESP_LOGI("DEVICE_PARAMETERS", "租赁次数覆盖: %d", final_count);
+						} else {
+							ESP_LOGE("DEVICE_PARAMETERS", "无效的租赁次数设置类型: %d", type);
+							build_device_parameters_process_reply(DEVICE_PARA_COUNT_LIMIT, 0, "FAIL", str_rid);
+							return;
+						}
+						
+						// 设置最终的次数
+						esp_err_t ret = set_count_limit(final_count);
+						const char* result = (ret == ESP_OK) ? "SUCCESS" : "FAIL";
+						
+						// 构造CMD 309响应消息
+						build_device_parameters_process_reply(DEVICE_PARA_COUNT_LIMIT, final_count, result, str_rid);
+						
+						ESP_LOGI("DEVICE_PARAMETERS", "租赁次数设置完成，结果: %s, 最终次数: %d", result, final_count);
+					} else {
+						ESP_LOGE("DEVICE_PARAMETERS", "count_limit参数格式错误");
+						build_device_parameters_process_reply(DEVICE_PARA_COUNT_LIMIT, 0, "FAIL", str_rid);
+					}
+				} else {
+					ESP_LOGE("DEVICE_PARAMETERS", "count_limit的SET_VALUE必须是对象类型");
+					build_device_parameters_process_reply(DEVICE_PARA_COUNT_LIMIT, 0, "FAIL", str_rid);
+				}
+				return;
+			}
+			
+			// 处理普通数值型参数
+			cJSON* JSON_set_data = cJSON_GetObjectItem(root, "SET_VALUE");
+			int set_data = JSON_set_data->valueint;
+			
+			printf("key:%s, data:%d\n", str_set_key, set_data);
+			// 同步 server 和 Flash 的 key
+			for(int i=0; i<DEVICE_PARA_MAX; i++){  // 只比较普通参数
+				if((strcmp(str_set_key, server_keys[i])) == 0){
+					func_device_parameters_process(i, set_data, str_rid);
+					break;
+				}
+			}
+		}
+
+		else {
+			ESP_LOGI(TAG, "NO PROCESS CMD %d", CMD->valueint);
+		}
+		
+		// 释放内存
+		cJSON_Delete(root);
+	}
+}
 
 
 
