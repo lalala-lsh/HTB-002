@@ -1169,6 +1169,47 @@ static int current_date = 0;  // 格式：YYYYMMDD
 /**
  * @brief 检查是否是新的一天，如果是则重置计数
  */
+void reset_daily_count_if_new_day(void)
+{
+    time_t now = get_rtc_timestamp();
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    int today = (timeinfo.tm_year + 1900) * 10000 + (timeinfo.tm_mon + 1) * 100 + timeinfo.tm_mday;
+    
+    if (current_date != today) {
+        // 新的一天，重置计数
+        current_date = today;
+        current_daily_count = 0;
+        
+        // 从NVS读取今天的计数
+        nvs_handle_t my_handle;
+        esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, RCG_CODE_SPACENAME, NVS_READWRITE, &my_handle);
+        if (err == ESP_OK) {
+            int32_t stored_date = 0;
+            uint32_t stored_count = 0;
+            
+            // 读取上次存储的日期
+            err = nvs_get_i32(my_handle, LAST_DATE_KEY, &stored_date);
+            if (err == ESP_OK && stored_date == today) {
+                // 同一天，读取计数
+                err = nvs_get_u32(my_handle, DAILY_COUNT_KEY, &stored_count);
+                if (err == ESP_OK) {
+                    current_daily_count = stored_count;
+                }
+            } else {
+                // 新的一天或第一次，重置计数为0
+                current_daily_count = 0;
+                nvs_set_i32(my_handle, LAST_DATE_KEY, today);
+                nvs_set_u32(my_handle, DAILY_COUNT_KEY, 0);
+                nvs_commit(my_handle);
+            }
+            nvs_close(my_handle);
+        }
+        
+        ESP_LOGI("RCG_CODE", "日期检查: %d, 当前计数: %lu", today, current_daily_count);
+    }
+}
 
 /**
  * @brief 递增每日识别次数
@@ -1177,11 +1218,54 @@ static int current_date = 0;  // 格式：YYYYMMDD
 /**
  * @brief 获取当前每日识别次数
  */
+uint32_t get_daily_count(void)
+{
+    reset_daily_count_if_new_day();
+    return current_daily_count;
+}
 
 /**
  * @brief 生成RCG_CODE
  * @return 格式为YYYYMMDDNN的RCG_CODE
  */
+uint32_t generate_rcg_code(void)
+{
+    time_t now = get_rtc_timestamp();
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    // 添加详细调试信息
+    ESP_LOGI("RCG_CODE", "调试时间信息:");
+    ESP_LOGI("RCG_CODE", "  - time_t now = %ld", (long)now);
+    ESP_LOGI("RCG_CODE", "  - tm_year = %d (原始值)", timeinfo.tm_year);
+    ESP_LOGI("RCG_CODE", "  - tm_year + 1900 = %d (实际年份)", timeinfo.tm_year + 1900);
+    ESP_LOGI("RCG_CODE", "  - tm_mon = %d (0-11)", timeinfo.tm_mon);
+    ESP_LOGI("RCG_CODE", "  - tm_mon + 1 = %d (实际月份)", timeinfo.tm_mon + 1);
+    ESP_LOGI("RCG_CODE", "  - tm_mday = %d (日期)", timeinfo.tm_mday);
+    
+    // 递增识别次数
+    increment_daily_count();
+    
+    // 生成RCG_CODE: YYYYMMDDNN - 分步计算以便调试
+    uint32_t year_part = (timeinfo.tm_year + 1900) * 1000000UL;
+    uint32_t month_part = (timeinfo.tm_mon + 1) * 10000UL;
+    uint32_t day_part = timeinfo.tm_mday * 100UL;
+    uint32_t count_part = current_daily_count;
+    
+    ESP_LOGI("RCG_CODE", "RCG_CODE各部分计算:");
+    ESP_LOGI("RCG_CODE", "  - 年份部分: %lu * 1000000 = %lu", (unsigned long)(timeinfo.tm_year + 1900), year_part);
+    ESP_LOGI("RCG_CODE", "  - 月份部分: %lu * 10000 = %lu", (unsigned long)(timeinfo.tm_mon + 1), month_part);
+    ESP_LOGI("RCG_CODE", "  - 日期部分: %lu * 100 = %lu", (unsigned long)timeinfo.tm_mday, day_part);
+    ESP_LOGI("RCG_CODE", "  - 计数部分: %lu", count_part);
+    
+    uint32_t rcg_code = year_part + month_part + day_part + count_part;
+    
+    ESP_LOGI("RCG_CODE", "生成RCG_CODE: %lu (%04d%02d%02d%02lu)", 
+             rcg_code, timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, 
+             timeinfo.tm_mday, current_daily_count);
+    
+    return rcg_code;
+}
 
 /**
  * @brief 获取剩余使用次数
