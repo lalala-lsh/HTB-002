@@ -1214,6 +1214,26 @@ void reset_daily_count_if_new_day(void)
 /**
  * @brief 递增每日识别次数
  */
+esp_err_t increment_daily_count(void)
+{
+    reset_daily_count_if_new_day();
+    
+    current_daily_count++;
+    
+    // 保存到NVS
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, RCG_CODE_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u32(my_handle, DAILY_COUNT_KEY, current_daily_count);
+        if (err == ESP_OK) {
+            err = nvs_commit(my_handle);
+        }
+        nvs_close(my_handle);
+    }
+    
+    ESP_LOGI("RCG_CODE", "递增识别次数: %lu", current_daily_count);
+    return err;
+}
 
 /**
  * @brief 获取当前每日识别次数

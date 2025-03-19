@@ -511,6 +511,17 @@ static void feed_task(void* arg)
                 feed_count_down_remind(feed_timecnt);
             }
             
+            // 租赁模式防误触逻辑：红光开启30秒后扣减次数
+            if (!count_deducted && feed_timecnt >= 30) {
+                int count_limit = get_count_limit();
+                if (count_limit > 0) {
+                    count_limit--;
+                    set_count_limit(count_limit);
+                    count_deducted = true;  // 标记已经扣减过次数
+                    ESP_LOGI(TAG, "红光模式运行30秒后，扣减使用次数，剩余: %d", count_limit);
+                }
+            }
+            
             // 检查哺光是否完成
             if (feed_timecnt >= feed_timecontrol) {
                 handle_feed_completion(&tcount, &ccount, &bcount);
