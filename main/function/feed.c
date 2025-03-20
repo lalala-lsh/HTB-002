@@ -411,8 +411,124 @@ void dal_40hz_beep_control_switch(uint8_t onoff)
 开启: 开启红光功能
 关闭: 关闭红光PWM输出
 */
+void feed_func_set(uint32_t onoff)
+{
+    if (onoff) {
+        // 开始训练并初始化
+        start_feed_training();
+    } else {
+        // 停止训练并收尾
+        stop_feed_training();
+    }
+}
 
 // 开始哺光训练
+static void start_feed_training(void)
+{
+    // 检查电量是否足够开启红光功能
+    if(!can_use_red_light_function()) {
+        play_voice(DISABLE_HEAT);  // 复用低电量语音提示
+        ESP_LOGI("FEED", "电量不足，禁用红光功能");
+        return;
+    }
+    
+    // 生成RCG_CODE并保存到全局变量
+    current_rcg_code = generate_rcg_code();
+    
+    // 开始训练时初始化图片存储并传入RCG_CODE
+    start_training_session_with_code(current_rcg_code);
+    
+    if (feed_status != FEED_ING) { 
+        // 关键修改：训练开始前强制验证时间有效性
+        ESP_LOGI(TAG, "训练开始前检查时间有效性...");
+        
+        // if (!is_time_valid()) {
+        //     ESP_LOGW(TAG, "时间未同步，训练无法开始！等待时间同步...");
+            
+        //     // 强制等待时间同步，最多等待30秒
+        //     if (!wait_for_time_sync(30)) {
+        //         ESP_LOGE(TAG, "时间同步失败，训练被中止");
+        //         return; // 直接返回，不开始训练
+        //     }
+            
+        //     ESP_LOGI(TAG, "时间同步成功，可以开始训练");
+        // }
+        
+        feed_status = FEED_ING;
+        feed_timecnt = 0;
+        // 重置30秒计时器和扣减标志
+        feed_30s_counter = 0;
+        count_deducted = false;
+        // 重置加热状态，后面会根据实际情况设置
+        training_heat_status = 0;
+        
+        // // 使用安全的时间戳函数，确保时间有效
+        // feed_st = get_safe_timestamp();
+        
+        // // 验证获取的时间戳是否有效
+        // if (feed_st == 0) {
+        //     ESP_LOGE(TAG, "无法获取有效时间戳，训练被中止");
+        //     feed_status = FEED_NONE; // 恢复状态
+        //     return;
+        // }
+
+        // 尝试获取开始时间戳，失败不阻塞功能
+        time_t start_ts = get_safe_timestamp();
+        feed_st = (int)start_ts;
+        feed_start_mono_us = esp_timer_get_time();
+        update_time_anchor_if_valid(start_ts);
+        
+        ESP_LOGI(TAG, "开始哺光训练，start_ts: %ld, mono_us: %lld, RCG_CODE: %ld", (long)feed_st,
+                 (long long)feed_start_mono_us, current_rcg_code);
+    }
+    
+    // 初始化电源和红光控制
+    Xl9535_Set_Io_Status(PIN_P06, IO_LOW);  // 彩光使能脚拉低
+    drv_feed_powerIO_init(SOC_GPIO_OUTPUT_ON); // 红光电源引脚使能
+    uint32_t duty = FEED_DUTY;
+#if HAVE_HEATING_MODE_KEY
+    // 检查feeding_heat参数，决定是否在红光模式下开启加热
+    int feeding_heat = get_device_para(DEVICE_PARA_FEEDING_HEAT);
+    if (feeding_heat == 1) {
+        // feeding_heat=1时，根据电量决定是否开启加热
+        #if LOW_POWER_TURN_OFF_HEAT
+        if(can_use_heating_function()) {
+            // 电量足够，开启加热
+            heating_control(FUNC_ON);
+            ESP_LOGI("FEED", "feeding_heat=1, 电量足够，加热功能正常工作");
+        } else {
+            play_voice(DISABLE_HEAT);
+            heating_control(FUNC_OFF);
+            ESP_LOGI("FEED", "feeding_heat=1, 电量不足，禁用加热功能");
+        }
+        #else
+        heating_control(FUNC_ON);
+        ESP_LOGI("FEED", "feeding_heat=1, 开启加热");
+        #endif
+    } else {
+        // feeding_heat=0时，红光模式下不开启加热
+        heating_control(FUNC_OFF);
+        ESP_LOGI("FEED", "feeding_heat=0, 红光模式下不开启加热");
+    }
+#endif
+
+    // 记录加热状态（在加热控制之后）
+    training_heat_status = heat_set_status();
+
+    //开启蜂鸣器    LINJUN
+    dal_40hz_beep_control_switch(1);
+
+    // 设置PWM占空比
+    ESP_ERROR_CHECK(ledc_set_duty(FEED_PWM_MODE, FEEDL_PWM_CHANNEL, duty));
+    ESP_ERROR_CHECK(ledc_set_duty(FEED_PWM_MODE, FEEDR_PWM_CHANNEL, duty));
+    ESP_ERROR_CHECK(ledc_update_duty(FEED_PWM_MODE, FEEDL_PWM_CHANNEL));
+    ESP_ERROR_CHECK(ledc_update_duty(FEED_PWM_MODE, FEEDR_PWM_CHANNEL));
+    
+#if EN_RED_SPARK
+    s_red_status_cnt = 0;
+    s_red_status = RED_HIGH;
+#endif
+}
 
 // 停止哺光训练
 
