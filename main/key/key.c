@@ -118,6 +118,11 @@ void double_press_judge()
     }
 }
 
+static void IRAM_ATTR gpio_isr_handler(void *arg)
+{
+    uint32_t gpio_num = (uint32_t)arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL); // 向指定的队列发送数据
+}
 
 static KEY_FUNC_E key_status = KEY_FUNC_OFF;
 
