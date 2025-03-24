@@ -171,6 +171,21 @@ static void key_interrupt_task(void *arg)
             // 如果是按键1进入中断
             if (io_num == KEY_1_INPUT_IO)
             {    
+                // 检查电量是否足够使用红光功能（20%阈值）
+                if(!can_use_red_light_function() && (key_status == KEY_FUNC_OFF || key_status == KEY_FUNC_HEAT)) {
+                    ESP_LOGW("KEY", "电量不足20%%，禁用红光并关闭功能");
+                    play_voice(POWER_WARNING);  // 播放低电量警告语音
+                    if (key_status == KEY_FUNC_HEAT) {
+                        save_heat_only_record();
+                    }
+                    key_status = KEY_FUNC_OFF;
+                    feed_func_set(FUNC_OFF);
+                    beici_func_set(FUNC_OFF);//关闭贝茨模
+                    heating_control(FUNC_OFF);//关闭加热模式
+                    set_func_led(KEY_FUNC_OFF, FUNC_OFF);
+                    continue;  // 跳过后续处理
+                }
+                
                 // 检查使用次数限制
                 int count_limit = get_count_limit();
                 ESP_LOGI("KEY", "当前剩余次数: %d", count_limit);

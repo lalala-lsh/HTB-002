@@ -133,6 +133,44 @@ void reset_battery_calibration(void)
 
 
 // 检查是否可以使用红光功能（基于稳定的电量百分比判断，10%阈值）
+bool can_use_red_light_function(void)
+{
+    int current_power = get_battery_power();
+    
+    // 如果电量未初始化，读取一次ADC作为备用判断
+    if(current_power == -1) {
+        int current_adc_raw, current_voltage;
+        if(adc_oneshot_read(adc1_handle, CHARGE_ADC1_CHAN0, &current_adc_raw) != ESP_OK ||
+           adc_cali_raw_to_voltage(adc1_cali_handle, current_adc_raw, &current_voltage) != ESP_OK) {
+            ESP_LOGE("POWER", "无法读取ADC电压，禁用红光功能");
+            return false;
+        }
+        
+        // 备用阈值：根据校准后的满电电压计算20%电量的ADC电压
+        int current_max_voltage = is_calibration_done ? calibrated_full_voltage : 2000;
+        const int RED_LIGHT_MIN_ADC_VOLTAGE = 1500 + ((current_max_voltage - 1500) * 20) / 100;
+        bool can_use_red = (current_voltage >= RED_LIGHT_MIN_ADC_VOLTAGE);
+        
+#if DEBUG_
+        ESP_LOGI("POWER", "红光功能检查(备用ADC): ADC=%dmV, 阈值=%dmV, 可用=%s", 
+                 current_voltage, RED_LIGHT_MIN_ADC_VOLTAGE, 
+                 can_use_red ? "是" : "否");
+#endif
+        return can_use_red;
+    }
+    
+    // 使用稳定的电量百分比进行判断，避免ADC读数波动
+    const int RED_LIGHT_MIN_BATTERY_PERCENT = 20;  // 20%电量阈值
+    bool can_use_red = (current_power >= RED_LIGHT_MIN_BATTERY_PERCENT);
+    
+#if DEBUG_
+    ESP_LOGI("POWER", "红光功能检查: 当前电量=%d%%, 阈值=%d%%, 可用=%s", 
+             current_power, RED_LIGHT_MIN_BATTERY_PERCENT, 
+             can_use_red ? "是" : "否");
+#endif
+    
+    return can_use_red;
+}
 
 // ESP32示例代码
 void send_battery_level(void) {
