@@ -671,6 +671,42 @@ static void feed_task(void* arg)
 
 // 处理红光呼吸灯效果
 #if EN_RED_SPARK
+static void handle_red_light_breathing(int *duty) {
+    if (s_red_status == RED_HIGH) {
+        if(++s_red_status_cnt >= 2) {
+            ESP_LOGI(TAG, "从高降到低, feed_timecnt = %ld, s_red_status_cnt = %d", feed_timecnt, s_red_status_cnt);
+            s_red_status = RED_LOW;
+            s_red_status_cnt = 0;
+            //从高降到低
+            *duty = ((FEED_DUTY_MAX) * 20) / 100;
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(FEEDL_PWM_MODE, FEEDL_PWM_CHANNEL, *duty, 2000));
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(FEEDR_PWM_MODE, FEEDR_PWM_CHANNEL, *duty, 2000));
+            ESP_ERROR_CHECK(ledc_fade_start(FEEDL_PWM_MODE, FEEDL_PWM_CHANNEL, LEDC_FADE_NO_WAIT));
+            ESP_ERROR_CHECK(ledc_fade_start(FEEDR_PWM_MODE, FEEDR_PWM_CHANNEL, LEDC_FADE_NO_WAIT));
+            ESP_LOGI(TAG, "feed_status == FEED_ING, feed_timecnt = %ld", feed_timecnt);
+        }
+    } else if (s_red_status == RED_LOW) {
+        if(++s_red_status_cnt >= 3) {
+            ESP_LOGI(TAG, "从低升到高, feed_timecnt = %ld, s_red_status_cnt = %d", feed_timecnt, s_red_status_cnt);
+            s_red_status = RED_RISING;
+            s_red_status_cnt = 0;
+            //从低升到高
+            *duty = FEED_DUTY;
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(FEEDL_PWM_MODE, FEEDL_PWM_CHANNEL, *duty, 3000));
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(FEEDR_PWM_MODE, FEEDR_PWM_CHANNEL, *duty, 3000));
+            ESP_ERROR_CHECK(ledc_fade_start(FEEDL_PWM_MODE, FEEDL_PWM_CHANNEL, LEDC_FADE_NO_WAIT));
+            ESP_ERROR_CHECK(ledc_fade_start(FEEDR_PWM_MODE, FEEDR_PWM_CHANNEL, LEDC_FADE_NO_WAIT));
+            ESP_LOGI(TAG, "feed_status == FEED_ING, feed_timecnt = %ld", feed_timecnt);
+        }
+    } else if (s_red_status == RED_RISING) {
+        if(++s_red_status_cnt >= 2) {
+            ESP_LOGI(TAG, "维持高, feed_timecnt = %ld, s_red_status_cnt = %d", feed_timecnt, s_red_status_cnt);
+            s_red_status = RED_HIGH;
+            s_red_status_cnt = 0;
+            //维持高
+        }
+    }
+}
 #endif
 
 // 初始化彩光模式
