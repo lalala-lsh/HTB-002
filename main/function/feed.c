@@ -997,6 +997,14 @@ void update_feed_time(void)
 /** 
  * \brief 更新彩光时间  linjun
  **/
+void update_color_time(void)
+{
+    int color_t = 0;
+
+    color_t = get_device_para(DEVICE_PARA_RUOSHI_T);
+    color_timecontrol = color_t * 60;
+    s_beici_time_everymode = color_timecontrol / BEICI_MODE_MAX;
+}
 
 /** 
  * \brief 更新蜂鸣器状态  linjun
