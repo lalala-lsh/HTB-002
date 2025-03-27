@@ -239,6 +239,17 @@ static void key_interrupt_task(void *arg)
                         //发送语音"红光模式"
                         play_voice(FEED_LIGHT);
                         break;
+                    default:
+                        key_status = KEY_FUNC_OFF;
+                        feed_func_set(FUNC_OFF);
+                        beici_func_set(FUNC_OFF);//关闭贝茨模
+                        save_heat_only_record();  // 保存加热历史记录（如果有）
+                        heating_control(FUNC_OFF);//关闭加热模式
+                        set_func_led(KEY_FUNC_OFF, FUNC_OFF);
+                        //发送语音停止
+                        play_voice(STOP);
+                        ESP_LOGI("KEY", "key_1_status =KEY_FUNC_OFF--2");
+                        break;
                 }
 #else
                 if (key_status == KEY_FUNC_MODE_1) // 如果当前是红光模式，则关闭

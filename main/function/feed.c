@@ -591,8 +591,37 @@ static void start_beici_training(void)
 }
 
 // 停止彩光训练
+static void stop_beici_training(void)
+{
+    //关闭蜂鸣器    LINJUN
+    dal_40hz_beep_control_switch(0);
+    set_func_led(KEY_FUNC_OFF, FUNC_OFF);
+    feed_status = FEED_NONE;
+    beici_start_mono_us = 0;
+    stop_running_light();
+}
 
 // 关闭当前运行的功能
+static void stop_running_light() 
+{
+    current_mode = MODE_COUNT - 1;
+    color_light_status = COLOR_LIGHT_NONE;
+    
+    // 关闭所有LED灯
+    static const snPinName_t all_pins[] = {
+        PIN_P00, PIN_P14, PIN_P05, PIN_P12, PIN_P04, PIN_P13, 
+        PIN_P03, PIN_P17, PIN_P02, PIN_P16, PIN_P01, PIN_P15
+    };
+    
+    for (int i = 0; i < sizeof(all_pins)/sizeof(all_pins[0]); i++) {
+        Xl9535_Set_Io_Status(all_pins[i], IO_HIGH);
+    }
+    
+    // 关闭所有颜色
+    drv_feed_powerIO_init(SOC_GPIO_OUTPUT_ON); // 关闭红色
+    Xl9535_Set_Io_Status(PIN_P06, IO_LOW);     // 关闭绿色
+    current_color = COLOR_RED;                 // 重置颜色状态
+}
 
 static void feed_task(void* arg)
 // 哺光任务有两种结束情况：
