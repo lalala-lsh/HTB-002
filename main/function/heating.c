@@ -31,6 +31,13 @@ static bool heat_bt_was_enabled = false;
 
 
 //linjun
+void update_heating_time(void)
+{
+    int heat_t = 0;
+
+    heat_t = get_device_para(DEVICE_PARA_HEAT_T);
+    heat_timecontrol = heat_t * 60;
+}
 
 uint8_t heat_set_status()
 {
