@@ -531,6 +531,42 @@ static void start_feed_training(void)
 }
 
 // 停止哺光训练
+static void stop_feed_training(void)
+{
+    // 重置RCG_CODE
+    current_rcg_code = 0;
+    ESP_LOGI(TAG, "关闭红光");
+
+    //关闭蜂鸣器    LINJUN
+    dal_40hz_beep_control_switch(0);
+    
+    // 关闭加热和状态复位
+    heating_control(FUNC_OFF);
+    feed_timecnt = 0;
+    feed_status = FEED_NONE;
+    feed_start_mono_us = 0;
+    
+    // 重置租赁模式防误触标志
+    count_deducted = false;
+    feed_30s_counter = 0;
+    
+    // 平滑关闭红光
+    ESP_ERROR_CHECK(ledc_set_fade_with_time(FEED_PWM_MODE, FEEDL_PWM_CHANNEL, 0, 1000));
+    ESP_ERROR_CHECK(ledc_set_fade_with_time(FEED_PWM_MODE, FEEDR_PWM_CHANNEL, 0, 1000));
+    ESP_ERROR_CHECK(ledc_fade_start(FEED_PWM_MODE, FEEDL_PWM_CHANNEL, LEDC_FADE_NO_WAIT));
+    ESP_ERROR_CHECK(ledc_fade_start(FEED_PWM_MODE, FEEDR_PWM_CHANNEL, LEDC_FADE_NO_WAIT));
+    drv_feed_powerIO_init(SOC_GPIO_OUTPUT_ON); // 红光电源引脚关闭
+    
+    // 停止摄像头
+    // camera_stop();
+    // ESP_LOGI(TAG, "关闭摄像头");
+    
+    vTaskDelay(pdMS_TO_TICKS(200));
+#if EN_RED_SPARK
+    s_red_status_cnt = 0;
+    s_red_status = RED_OFF;
+#endif
+}
 
 /*
 BEICI功能控制
