@@ -275,6 +275,53 @@ static void power_adc_init(void)
 }
 
 // 初始化电量管理
+static void power_init(void)
+{
+    // 尝试从NVS读取之前保存的校准数据
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("battery_cal", NVS_READONLY, &handle);
+    
+    if (err == ESP_OK) {
+        // 读取保存的校准数据
+        size_t required_size = sizeof(int32_t);
+        int32_t stored_max_voltage = 0;
+        int32_t stored_full_voltage = 2000;
+        uint8_t stored_cal_done = 0;
+        
+        nvs_get_i32(handle, "max_voltage", &stored_max_voltage);
+        nvs_get_i32(handle, "full_voltage", &stored_full_voltage);
+        nvs_get_u8(handle, "cal_done", &stored_cal_done);
+        
+        nvs_close(handle);
+        
+        // 验证读取的数据是否合理
+        if (stored_full_voltage >= 1800 && stored_full_voltage <= 2000 && stored_max_voltage > 0) {
+            max_recorded_voltage = stored_max_voltage;
+            calibrated_full_voltage = stored_full_voltage;
+            is_calibration_done = (stored_cal_done == 1);
+            
+#if DEBUG_
+            ESP_LOGI("POWER", "从NVS恢复校准数据: 最高=%dmV, 满电=%dmV, 已校准=%s", 
+                     max_recorded_voltage, calibrated_full_voltage, 
+                     is_calibration_done ? "是" : "否");
+#endif
+        } else {
+            // 数据无效，使用默认值
+            max_recorded_voltage = 0;
+            calibrated_full_voltage = 2000;
+            is_calibration_done = false;
+            ESP_LOGI("POWER", "NVS校准数据无效，使用默认值");
+        }
+    } else {
+        // 首次运行或NVS错误，使用默认值
+        max_recorded_voltage = 0;
+        calibrated_full_voltage = 2000;
+        is_calibration_done = false;
+        ESP_LOGI("POWER", "未找到NVS校准数据，使用默认值");
+    }
+    
+    ESP_LOGI("POWER", "电量管理初始化完成");
+}
 
 static void power_check()
 {
@@ -337,6 +384,20 @@ static void power_check_task(void* arg)
     }
 }
 
+static void power_check_first()
+{
+    ESP_LOGI("POWER", "开始首次电量检测...");
+    
+    // 等待ADC稳定后进行一次检测
+    vTaskDelay(pdMS_TO_TICKS(100));
+    power_check();
+    
+    ESP_LOGI("POWER", "首次电量检测完成，当前电量: %d%%, 电源状态: %s", 
+             get_battery_power(), 
+             (get_power_state() == POWER_STATE_LOW) ? "低电量" : "正常");
+    
+    xTaskCreate(power_check_task, "power_check_task", 4096, NULL, PRIORITY_POWER_CHECK_TASK, NULL);
+}
 
 static uint32_t s_timeout = 0;
 // 移除之前添加的 s_first_sleep 变量
