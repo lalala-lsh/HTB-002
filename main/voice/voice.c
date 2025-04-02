@@ -376,6 +376,11 @@ static void voice_task(void* arg)
                 ESP_LOGI(TAG, "REMIND命令处理: cmd=0x%x, feed_status=%d", cmd, feed_set_status());
                 handle_voice_music_recovery(cmd, 2400); // 使用统一的恢复逻辑
             } 
+            else if(cmd == POWER_WARNING && training_flag == true) {
+                // 训练模式下跳过低电量语音播报，只记录日志
+                ESP_LOGI(TAG, "训练模式下跳过低电量语音播报: cmd=0x%x", cmd);
+                // 不播放语音，不执行任何音频操作
+            } 
             else {
                 // 其他命令，播放完成后使用统一的音乐恢复逻辑
                 handle_voice_music_recovery(cmd, 2500); // 使用统一的恢复逻辑
