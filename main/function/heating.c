@@ -28,6 +28,38 @@ static bool heat_wifi_was_started = false;
 static bool heat_bt_was_enabled = false;
 // 外部引用当前设备参数值
 
+static void heat_rf_shutdown(void)
+{
+    if (heat_rf_managed) {
+        return;
+    }
+
+    esp_err_t err = esp_wifi_stop();
+    if (err == ESP_OK) {
+        heat_wifi_was_started = true;
+        ESP_LOGI(TAG, "加热模式：Wi-Fi已停止");
+    } else if (err == ESP_ERR_WIFI_NOT_STARTED || err == ESP_ERR_WIFI_NOT_INIT) {
+        heat_wifi_was_started = false;
+    } else {
+        ESP_LOGW(TAG, "加热模式：esp_wifi_stop失败: %s", esp_err_to_name(err));
+    }
+
+    esp_bt_controller_status_t bt_status = esp_bt_controller_get_status();
+    if (bt_status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+        err = esp_bt_controller_disable();
+        if (err == ESP_OK) {
+            heat_bt_was_enabled = true;
+            ESP_LOGI(TAG, "加热模式：BT已关闭");
+        } else {
+            ESP_LOGW(TAG, "加热模式：esp_bt_controller_disable失败: %s", esp_err_to_name(err));
+        }
+    } else {
+        heat_bt_was_enabled = false;
+    }
+
+    heat_rf_managed = true;
+    heat_rf_reopened = false;
+}
 
 
 //linjun
