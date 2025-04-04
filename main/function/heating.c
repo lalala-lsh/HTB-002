@@ -61,6 +61,38 @@ static void heat_rf_shutdown(void)
     heat_rf_reopened = false;
 }
 
+static void heat_rf_restore(void)
+{
+    if (!heat_rf_managed) {
+        return;
+    }
+
+    if (heat_wifi_was_started) {
+        esp_err_t err = esp_wifi_start();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "加热模式：Wi-Fi已恢复");
+        } else {
+            ESP_LOGW(TAG, "加热模式：esp_wifi_start失败: %s", esp_err_to_name(err));
+        }
+    }
+
+    if (heat_bt_was_enabled) {
+        esp_bt_controller_status_t bt_status = esp_bt_controller_get_status();
+        if (bt_status != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+            esp_err_t err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "加热模式：BT已恢复");
+            } else if (err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "加热模式：esp_bt_controller_enable失败: %s", esp_err_to_name(err));
+            }
+        }
+    }
+
+    heat_rf_managed = false;
+    heat_rf_reopened = true;
+    heat_wifi_was_started = false;
+    heat_bt_was_enabled = false;
+}
 
 //linjun
 void update_heating_time(void)
