@@ -349,6 +349,43 @@ time_t get_rtc_timestamp()
  * 这个函数应该定期调用，以确保系统时间准确
  * \return 如果需要重新同步并成功同步返回true，否则返回false
  */
+bool sync_system_with_rtc_if_needed()
+{
+    static bool rtc_read_failed = false;  // 记录RTC是否损坏
+
+    // 如果系统时间未同步，尝试同步一次
+    if (!system_time_synced) {
+        bool result = RTCTimeToSystemTime();
+        if (!result) {
+            rtc_read_failed = true;  // 标记RTC损坏
+        }
+        return result;
+    }
+
+    // 如果之前检测到RTC损坏，就不再频繁尝试读取
+    if (rtc_read_failed) {
+        return false;
+    }
+
+    // 获取系统时间与RTC时间
+    time_t sys_time = time(NULL);
+    time_t rtc_time = get_rtc_timestamp();
+
+    // 如果RTC时间为0或1970年，说明RTC读取失败，标记为损坏
+    if (rtc_time < 1577836800) {  // 2020-01-01之前
+        ESP_LOGW("RTC", "RTC读取失败或时间不合理，标记为损坏状态");
+        rtc_read_failed = true;
+        return false;
+    }
+
+    // 如果差异超过5秒，重新同步
+    if (llabs(sys_time - rtc_time) > 5) {
+        ESP_LOGW("RTC", "系统时间与RTC时间不同步，差值为%ld秒，重新同步", (long)(sys_time - rtc_time));
+        return RTCTimeToSystemTime();
+    }
+
+    return false;
+}
 
 /*!
  * \brief 检查当前时间是否有效
@@ -423,6 +460,24 @@ bool is_time_valid(void)
  * \param timeout_seconds 参数保留兼容性（未使用）
  * \return true: 同步成功，false: 同步失败
  */
+bool wait_for_time_sync(uint32_t timeout_seconds)
+{
+    extern bool RTCTimeSet_flag;
+    
+    // 检查时间是否已经有效
+    if (is_time_valid()) {
+        ESP_LOGI("TIME_SYNC", "时间同步成功");
+        return true;
+    }
+    
+    // 尝试从RTC同步到系统时间
+    if (!RTCTimeSet_flag) {
+        ESP_LOGI("TIME_SYNC", "尝试从RTC同步时间到系统");
+        RTCTimeSet_flag = RTCTimeToSystemTime();
+    }
+    
+    return is_time_valid();
+}
 
 /*!
  * \brief 获取安全的时间戳
