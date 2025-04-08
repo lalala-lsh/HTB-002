@@ -1059,6 +1059,43 @@ void update_feed_time(void)
  * 当feeding_heat参数更新时，如果当前正在红光模式下运行，
  * 立即根据新参数值开启或关闭加热
  **/
+void update_feeding_heat(void)
+{
+#if HAVE_HEATING_MODE_KEY
+    // 检查当前是否在红光模式下运行
+    uint8_t current_feed_status = feed_set_status();
+    
+    if (current_feed_status == FEED_ING) {
+        // 当前正在红光模式下运行，立即应用新的feeding_heat参数
+        int feeding_heat = get_device_para(DEVICE_PARA_FEEDING_HEAT);
+        
+        if (feeding_heat == 1) {
+            // feeding_heat=1时，根据电量决定是否开启加热
+            #if LOW_POWER_TURN_OFF_HEAT
+            if(can_use_heating_function()) {
+                // 电量足够，开启加热
+                heating_control(FUNC_ON);
+                ESP_LOGI("FEED", "feeding_heat参数更新为1，当前红光模式运行中，开启加热");
+            } else {
+                play_voice(DISABLE_HEAT);
+                heating_control(FUNC_OFF);
+                ESP_LOGI("FEED", "feeding_heat参数更新为1，但电量不足，禁用加热功能");
+            }
+            #else
+            heating_control(FUNC_ON);
+            ESP_LOGI("FEED", "feeding_heat参数更新为1，当前红光模式运行中，开启加热");
+            #endif
+        } else {
+            // feeding_heat=0时，关闭加热
+            heating_control(FUNC_OFF);
+            ESP_LOGI("FEED", "feeding_heat参数更新为0，当前红光模式运行中，关闭加热");
+        }
+    } else {
+        // 当前不在红光模式下运行，无需操作
+        ESP_LOGI("FEED", "feeding_heat参数已更新，当前不在红光模式下运行，无需立即生效");
+    }
+#endif
+}
 /** 
  * \brief 更新彩光时间  linjun
  **/

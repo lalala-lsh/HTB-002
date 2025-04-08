@@ -701,11 +701,103 @@ void build_storagemessage(esp_mqtt_client_handle_t client)
  * - 其他的 build 相关函数都在 mqtt.c 文件被调用，但是这个函数是在本文件被调用，所以不传入 client 参数
  * - 传入不是 key 本身，而是对应的索引
  **/
+static void build_device_parameters_process_reply(int index, int value, const char* result, char* rid)
+{
+	esp_mqtt_client_handle_t client = get_mqtt_client();
+
+	if (client != NULL){
+		char* key = server_keys[index];
+
+		cJSON *root = NULL;
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "CMD", CMD_DEVICE_PARAMETERS_REPLY);
+		cJSON_AddStringToObject(root, "VERSION", device_version);
+		cJSON_AddStringToObject(root, "DEVICE_TYPE", DEVICE_TYPE);
+		cJSON_AddStringToObject(root, "DEVICE_CODE", c_user_data);
+		cJSON_AddNumberToObject(root, "DEVICE_TIME", time(NULL));
+		cJSON_AddStringToObject(root, "SET_KEY", key);
+		cJSON_AddNumberToObject(root, "SET_VALUE", value);
+		cJSON_AddStringToObject(root, "RES_CODE", result);
+		cJSON_AddStringToObject(root, "RID", rid);
+
+		char * String = NULL;
+		String = cJSON_PrintUnformatted(root);
+		int msg_id;
+		(void)msg_id;
+
+		msg_id = esp_mqtt_client_publish(client, push_topic, String, strlen(String), 0, 0);
+		ESP_LOGI(TAG, "参数设置功能回复成功, VersionMessage=%s, msg_id=%d", device_version, msg_id);
+		cJSON_free(String);
+		cJSON_Delete(root);
+	}
+}
 
 /** 
  * 调用 Flash 中的读写函数，根据成功与否调用 *参数设置* 并 *回复*
  * - 因为服务器端 key 设置和 flash 中不同，所以函数传入的是 index 
  **/
+void func_device_parameters_process(int index_key_device_parameters, int data, char* rid)
+{
+	ESP_LOGI("DEVICE_PARAMETERS", "参数 index%d 设置指令进入处理函数", index_key_device_parameters);
+	
+	char* result = "SUCCESS";
+
+	// 对于UDP IP地址，需要特殊处理
+	if (index_key_device_parameters == DEVICE_PARA_UDP_IP) {
+		// UDP IP地址是字符串类型，这里应该不会被调用
+		result = "FAIL";
+	} else {
+		// 正常的整型参数
+		esp_err_t err = set_device_parameters(index_key_device_parameters, data);
+		if(err != ESP_OK){
+			result = "FAIL";
+		}else{
+			result = "SUCCESS";
+			#if 1//(实时更新小程序设置参数linjun)
+			switch(index_key_device_parameters){
+				case DEVICE_PARA_BGM: // 背景音乐关闭自动生效
+					music_cycle();
+					break;
+				case DEVICE_PARA_VOL:	
+					update_volume();//设置音量大小
+					break;
+				case DEVICE_PARA_FEED_P:
+					update_feed_duty();//设置红光光强
+					break;
+				case DEVICE_PARA_FEED_T:
+					update_feed_time();//设置红光时长
+					break;
+				case DEVICE_PARA_RUOSHI_T:
+					update_color_time();//设置彩光时长
+					break;
+				case DEVICE_PARA_HEAT_T:
+					update_heating_time();//设置加热时长
+					break;
+				case DEVICE_PARA_CAMERA:
+					update_camera_status();//设置摄像头开关
+					break;
+				case DEVICE_PARA_40HZ:
+					update_beep_status();//设置蜂鸣器开关
+					ESP_LOGI("40HZ", "40HZ OK");
+					break;
+				case DEVICE_PARA_FEEDING_HEAT:
+					// 红光加热开关参数，实时生效
+					update_feeding_heat();
+					break;
+				case DEVICE_PARA_COUNT_LIMIT:
+					set_count_limit(data);//设置剩余次数
+					break;
+				default:
+					ESP_LOGE(TAG,"存在超出限制的指令 index");
+					break;
+			}
+			#endif
+		}
+	}
+
+	// 发送对应的回复消息
+	build_device_parameters_process_reply(index_key_device_parameters, data, result, rid);
+}
 
 /* *********************** end：设备参数设置部分 *********************** */
 
