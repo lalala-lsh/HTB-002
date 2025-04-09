@@ -87,6 +87,13 @@ static char* server_keys [] = {
 
 /* 蓝牙控制的软定时器中断函数 */
 esp_timer_handle_t periodic_timer;
+static void periodic_timer_callback(void* arg)
+{
+    int64_t time_since_boot = esp_timer_get_time();
+    ESP_LOGI("example", "关闭蓝牙广播，Periodic timer called, time since boot: %lld us", (long long)time_since_boot);
+	esp_blufi_adv_stop();
+	esp_timer_stop(periodic_timer);
+}
  
 void hash(unsigned char *output, const unsigned char *input, size_t input_len, mbedtls_md_type_t md_type) // 使用MD5哈希算法
 {

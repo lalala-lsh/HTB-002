@@ -160,4 +160,21 @@ extern char device_version[20];
  * 
  * @param arg 任务参数（未使用）
  */
+void mqtt_send_task(void *arg)
+{
+    while (1) {
+        // 检查是否正在上传图片或手动暂停，避免SSL冲突
+        if (!get_upload_status() && !heartbeat_paused) {
+            build_heartbeat(get_mqtt_client());
+        } else {
+            ESP_LOGD(TAG, "心跳已暂停（上传状态:%d, 手动暂停:%d）", get_upload_status(), heartbeat_paused);
+        }
+        vTaskDelay(pdMS_TO_TICKS(INTERVA_HEARTBEAT));  // 心跳30s发送一次
+    }
+}
 
+void set_mqtt_heartbeat_pause(bool pause)
+{
+    heartbeat_paused = pause;
+    ESP_LOGI(TAG, "MQTT心跳%s", pause ? "已暂停" : "已恢复");
+}
