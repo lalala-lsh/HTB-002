@@ -152,6 +152,65 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
  * 配置MQTT连接参数，初始化客户端并启动连接
  */
 extern char device_version[20];
+void mqtt_func_init(void)
+{
+    // 幂等性检查：如果MQTT已连接，直接返回
+    if (client_now != NULL && mqtt_state == MQTT_EVENT_CONNECTED_) {
+        ESP_LOGI(TAG, "MQTT already connected, skip initialization");
+        return;
+    }
+    // 上传期间避免重建MQTT，防止SSL/transport被破坏
+    if (get_upload_status()) {
+        ESP_LOGW(TAG, "上传中，跳过mqtt_func_init");
+        return;
+    }
+    
+    ESP_LOGI("GOT_IP", "网络连接创建成功，调用MQTT初始化功能");
+    
+    // 准备客户端ID和设备信息
+    memcpy(c_user_data, user_data, sizeof(user_data));
+    snprintf(c_client_id, sizeof(c_client_id), "htb-%s", c_user_data);
+
+    // 获取当前固件版本
+    getVersion(device_version);
+
+    // 重置MQTT状态和客户端
+    mqtt_state = MQTT_EVENT_IDLE_;
+    if(client_now != NULL) {
+        esp_err_t stop_ret = esp_mqtt_client_stop(client_now);
+        if (stop_ret != ESP_OK) {
+            ESP_LOGW(TAG, "MQTT stop failed: %s", esp_err_to_name(stop_ret));
+        }
+        esp_mqtt_client_destroy(client_now);
+        client_now = NULL;
+    }
+    
+    // 配置MQTT客户端
+    const esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = URI,
+        .credentials.username = "htb_device",
+        .credentials.authentication.password = password,
+        .credentials.client_id = c_client_id,
+        .network.timeout_ms = 10 * 1000,
+        .task = {
+            .stack_size = 8192,  // 增加MQTT主任务栈大小到8KB，防止栈溢出
+            .priority = 5        // 设置任务优先级  
+        }
+    }; 
+    
+    // 初始化并启动MQTT客户端
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
+    
+    // 安全启动，不使用 ESP_ERROR_CHECK
+    esp_err_t ret = esp_mqtt_client_start(client);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT start failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    ESP_LOGI(TAG, "mqtt server was started successfully");
+}
 
 /**
  * @brief MQTT心跳发送任务
