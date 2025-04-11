@@ -525,16 +525,71 @@ static void resume_mqtt_after_upload(bool mqtt_stopped)
     set_mqtt_heartbeat_pause(false);
 }
 
+static void upload_pictures_task(void* parameter)
+{
+    upload_task_params_t* params = (upload_task_params_t*)parameter;
+    if (!params) {
+        ESP_LOGE(TAG, "上传任务参数为空");
+        g_upload_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int ucode = params->ucode;
+    free(params);
+
+    ESP_LOGI(TAG, "异步图片上传任务启动，ucode=%d", ucode);
+    upload_pictures(ucode);
+
+    g_upload_task_handle = NULL;
+    vTaskDelete(NULL);
+}
 
 /**
  * @brief 获取当前图像上传状态
  * 
  * @return bool true表示正在上传，false表示空闲
  */
+bool get_upload_status(void)
+{
+    return g_is_uploading;
+}
 
 /**
  * @brief 异步上传指定RCG_CODE的图片
  */
+esp_err_t start_upload_pictures_async(int ucode)
+{
+    if (g_upload_task_handle != NULL || g_is_uploading) {
+        ESP_LOGW(TAG, "已有图片上传任务在运行，忽略新的请求");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    upload_task_params_t* params = (upload_task_params_t*)malloc(sizeof(upload_task_params_t));
+    if (!params) {
+        ESP_LOGE(TAG, "分配上传任务参数失败");
+        return ESP_ERR_NO_MEM;
+    }
+    params->ucode = ucode;
+
+    BaseType_t ret = xTaskCreate(
+        upload_pictures_task,
+        "img_upload",
+        8192,
+        params,
+        5,
+        &g_upload_task_handle
+    );
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "创建图片上传任务失败");
+        free(params);
+        g_upload_task_handle = NULL;
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
 
 
 /**
@@ -546,6 +601,297 @@ static void resume_mqtt_after_upload(bool mqtt_stopped)
  * @param ucode 用户码
  * @return esp_err_t ESP_OK表示上传成功，ESP_FAIL表示上传失败
  */
+esp_err_t upload_pictures(int ucode)
+{
+    if (g_is_uploading) {
+        ESP_LOGW(TAG, "已有上传任务在运行，跳过本次上传");
+        return ESP_ERR_INVALID_STATE;
+    }
+    g_is_uploading = true;
+    
+    // 上传前暂停心跳并停止MQTT，避免SSL冲突
+    ESP_LOGI(TAG, "暂停MQTT并停止客户端以避免SSL资源冲突");
+    bool mqtt_stopped = stop_mqtt_for_upload();
+    
+    // 检查内存状态，如果可用内存太低则延迟上传
+    size_t free_heap_start = esp_get_free_heap_size();
+    if (free_heap_start < 300000) {  // 如果可用内存小于300KB
+        ESP_LOGW(TAG, "可用内存不足 (%zu 字节)，延迟上传避免崩溃", free_heap_start);
+        vTaskDelay(pdMS_TO_TICKS(2000));  // 等待2秒让系统释放内存
+        free_heap_start = esp_get_free_heap_size();
+        if (free_heap_start < 200000) {  // 如果仍然不足200KB
+            ESP_LOGE(TAG, "内存严重不足 (%zu 字节)，取消上传", free_heap_start);
+            // 恢复MQTT心跳
+            resume_mqtt_after_upload(mqtt_stopped);
+            g_is_uploading = false;
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    
+    ESP_LOGI(TAG, "Image upload started for RCG_CODE: %d", ucode);
+    
+    // 打印详细内存信息用于调试
+    print_memory_info();
+    
+    // 检查当前可用内存
+    size_t free_heap = esp_get_free_heap_size();
+    size_t min_free_heap = esp_get_minimum_free_heap_size();
+    ESP_LOGI(TAG, "开始上传前内存状态: 可用堆=%zu, 最小可用堆=%zu", free_heap, min_free_heap);
+    
+    // 根据内存状况动态调整批处理大小
+    size_t BATCH_SIZE;
+
+    BATCH_SIZE = 50;   // 中等内存时使用50张
+
+    ESP_LOGI(TAG, "根据可用内存 %zu 字节，设置批处理大小为: %zu", free_heap, BATCH_SIZE);
+    
+    // 打开SPIFFS目录
+    DIR *dir = opendir("/spiffs");
+    if (!dir) {
+        ESP_LOGE(TAG, "Failed to open SPIFFS directory");
+        resume_mqtt_after_upload(mqtt_stopped);
+        g_is_uploading = false;
+        return ESP_FAIL;
+    }
+
+    // 构建RCG_CODE前缀用于过滤文件
+    char rcg_prefix[16];
+    snprintf(rcg_prefix, sizeof(rcg_prefix), "%d_", ucode);
+    ESP_LOGI(TAG, "只上传RCG_CODE前缀为 '%s' 的图片", rcg_prefix);
+
+    // 首先计算匹配RCG_CODE的jpg文件数量
+    int total_files = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strstr(entry->d_name, ".jpg") != NULL && 
+            strncmp(entry->d_name, rcg_prefix, strlen(rcg_prefix)) == 0) {
+            total_files++;
+        }
+    }
+
+    if (total_files == 0) {
+        ESP_LOGE(TAG, "No jpg files found in SPIFFS");
+        closedir(dir);
+        resume_mqtt_after_upload(mqtt_stopped);
+        g_is_uploading = false;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Found total %d files, will process in batches of %d", total_files, BATCH_SIZE);
+
+    // 计算实际需要的批次数
+    int total_batches = (total_files + BATCH_SIZE - 1) / BATCH_SIZE;
+    int processed_files = 0;
+
+    // 上传结果标志
+    esp_err_t final_result = ESP_OK;
+    
+    for (int current_batch = 1; current_batch <= total_batches; current_batch++) {
+        ESP_LOGI(TAG, "Processing batch %d/%d", current_batch, total_batches);
+        rewinddir(dir);  // 重置目录指针到开始位置
+
+        // 为当前批次分配内存，优先使用PSRAM
+        uint8_t **img_files = NULL;
+        char **filenames = NULL;
+        size_t *file_sizes = NULL;
+        
+#if CONFIG_SPIRAM_BOOT_INIT
+        img_files = (uint8_t**)heap_caps_malloc(BATCH_SIZE * sizeof(uint8_t*), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        filenames = (char**)heap_caps_malloc(BATCH_SIZE * sizeof(char*), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        file_sizes = (size_t*)heap_caps_malloc(BATCH_SIZE * sizeof(size_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+        
+        // 如果PSRAM分配失败，使用内部内存
+        if (!img_files) img_files = (uint8_t**)malloc(BATCH_SIZE * sizeof(uint8_t*));
+        if (!filenames) filenames = (char**)malloc(BATCH_SIZE * sizeof(char*));
+        if (!file_sizes) file_sizes = (size_t*)malloc(BATCH_SIZE * sizeof(size_t));
+
+        if (!img_files || !filenames || !file_sizes) {
+            ESP_LOGE(TAG, "Failed to allocate memory for arrays");
+            goto cleanup_batch;
+        }
+
+        // 初始化数组
+        memset(img_files, 0, BATCH_SIZE * sizeof(uint8_t*));
+        memset(filenames, 0, BATCH_SIZE * sizeof(char*));
+        memset(file_sizes, 0, BATCH_SIZE * sizeof(size_t));
+
+        // 跳过已处理的文件
+        int files_to_skip = (current_batch - 1) * BATCH_SIZE;
+        int jpg_files_seen = 0;  // 计数已经看到的jpg文件
+        
+        // 跳过之前批次的文件
+        while ((entry = readdir(dir)) != NULL) {
+            if (strstr(entry->d_name, ".jpg") != NULL && 
+                strncmp(entry->d_name, rcg_prefix, strlen(rcg_prefix)) == 0) {
+                if (jpg_files_seen >= files_to_skip) {
+                    break;  // 找到了这个批次的起始位置
+                }
+                jpg_files_seen++;
+            }
+        }
+
+        // 读取当前批次的文件
+        int batch_files = 0;
+        while (batch_files < BATCH_SIZE && processed_files < total_files && entry != NULL) {
+            // 处理当前entry - 只处理匹配RCG_CODE的jpg文件
+            if (strstr(entry->d_name, ".jpg") != NULL && 
+                strncmp(entry->d_name, rcg_prefix, strlen(rcg_prefix)) == 0) {
+                char file_path[512];
+                snprintf(file_path, sizeof(file_path), "/spiffs/%s", entry->d_name);
+                
+                FILE *file = fopen(file_path, "rb");
+                if (!file) {
+                    ESP_LOGE(TAG, "Failed to open file: %s", file_path);
+                    entry = readdir(dir);  // 获取下一个文件
+                    continue;
+                }
+
+                // 获取文件大小
+                fseek(file, 0, SEEK_END);
+                size_t file_size = ftell(file);
+                rewind(file);
+
+                // 分配内存并读取文件内容，优先使用PSRAM
+                img_files[batch_files] = NULL;
+#if CONFIG_SPIRAM_BOOT_INIT
+                img_files[batch_files] = (uint8_t*)heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+                if (!img_files[batch_files]) {
+                    // PSRAM分配失败时回退到内部内存
+                    img_files[batch_files] = (uint8_t*)malloc(file_size);
+                }
+                
+                if (img_files[batch_files]) {
+                    if (fread(img_files[batch_files], 1, file_size, file) == file_size) {
+                        filenames[batch_files] = strdup(entry->d_name);
+                        file_sizes[batch_files] = file_size;
+                        if (filenames[batch_files]) {
+                            ESP_LOGI(TAG, "Batch %d: Read file %d/%d: %s, size: %zu bytes", 
+                                    current_batch, batch_files + 1, BATCH_SIZE, 
+                                    entry->d_name, file_size);
+                            batch_files++;
+                            processed_files++;
+                        } else {
+                            free(img_files[batch_files]);
+                            img_files[batch_files] = NULL;
+                        }
+                    } else {
+                        free(img_files[batch_files]);
+                        img_files[batch_files] = NULL;
+                    }
+                }
+                fclose(file);
+            }
+            entry = readdir(dir);  // 获取下一个文件
+        }
+
+        // 上传当前批次的文件
+        if (batch_files > 0) {
+            // 上传前检查内存状况
+            size_t free_before = esp_get_free_heap_size();
+            ESP_LOGI(TAG, "上传前可用内存: %zu 字节", free_before);
+            
+            esp_err_t ret = http_post_multipart(CFG_IMG_API_URL, (char*)user_data, ucode, 
+                              (const uint8_t**)img_files, 
+                              (const char**)filenames, 
+                              batch_files,
+                              (const size_t*)file_sizes);
+            if (ret != ESP_OK) {
+                final_result = ESP_FAIL;  // 如果任何一批上传失败，标记最终结果为失败
+            }
+            
+            // 上传后检查内存状况
+            size_t free_after = esp_get_free_heap_size();
+            ESP_LOGI(TAG, "Batch %d/%d: Uploaded %d files, 内存变化: %zu -> %zu (差值: %ld)", 
+                    current_batch, total_batches, batch_files, free_before, free_after, 
+                    (long)(free_after - free_before));
+        }
+
+cleanup_batch:
+        // 清理当前批次的资源
+        if (img_files) {
+            for (int i = 0; i < BATCH_SIZE; i++) {
+                if (img_files[i]) free(img_files[i]);
+            }
+            free(img_files);
+        }
+        if (filenames) {
+            for (int i = 0; i < BATCH_SIZE; i++) {
+                if (filenames[i]) free(filenames[i]);
+            }
+            free(filenames);
+        }
+        if (file_sizes) {
+            free(file_sizes);
+        }
+
+        // 在批次之间添加延时，让系统回收内存
+        vTaskDelay(pdMS_TO_TICKS(500));  // 延时500ms让内存有时间释放
+        
+        // 手动触发垃圾回收
+        size_t free_heap_after_batch = esp_get_free_heap_size();
+        ESP_LOGI(TAG, "批次 %d 完成后可用内存: %zu 字节", current_batch, free_heap_after_batch);
+    }
+
+    closedir(dir);
+    ESP_LOGI(TAG, "Image upload completed - Processed %d files in %d batches", 
+             processed_files, total_batches);
+             
+    // 上传完成后，如果上传成功则只删除对应RCG_CODE的图片
+    if (final_result == ESP_OK) {
+        ESP_LOGI(TAG, "RCG_CODE %d 的图片上传成功，开始删除对应的图片文件", ucode);
+        
+        // 删除指定RCG_CODE的图片
+        DIR *del_dir = opendir("/spiffs");
+        if (del_dir) {
+            struct dirent *del_entry;
+            int deleted_count = 0;
+            
+            while ((del_entry = readdir(del_dir)) != NULL) {
+                if (strstr(del_entry->d_name, ".jpg") != NULL && 
+                    strncmp(del_entry->d_name, rcg_prefix, strlen(rcg_prefix)) == 0) {
+                    
+                    char file_path[512];
+                    snprintf(file_path, sizeof(file_path), "/spiffs/%s", del_entry->d_name);
+                    
+                    if (remove(file_path) == 0) {
+                        ESP_LOGI(TAG, "已删除: %s", del_entry->d_name);
+                        deleted_count++;
+                    } else {
+                        ESP_LOGE(TAG, "删除失败: %s", del_entry->d_name);
+                    }
+                }
+            }
+            closedir(del_dir);
+            ESP_LOGI(TAG, "删除完成，共删除 %d 个RCG_CODE %d 的图片文件", deleted_count, ucode);
+        } else {
+            ESP_LOGE(TAG, "无法打开目录进行删除操作");
+        }
+    } else {
+        ESP_LOGW(TAG, "由于上传失败，保留RCG_CODE %d 的图片文件", ucode);
+    }
+    
+    // 上传任务完成后添加更长延迟，确保所有网络资源完全释放
+    ESP_LOGI(TAG, "图片上传任务完成，等待网络资源释放...");
+    
+    // 强制清理SSL上下文和网络连接池
+    ESP_LOGI(TAG, "强制清理SSL上下文...");
+    
+    // 等待更长时间确保所有SSL连接完全关闭
+    vTaskDelay(pdMS_TO_TICKS(3000));  // 增加到3秒等待时间
+    
+    // 强制执行垃圾回收
+    size_t final_free_heap = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "上传任务结束后可用内存: %zu 字节", final_free_heap);
+    
+    // 恢复MQTT心跳并重启MQTT
+    ESP_LOGI(TAG, "恢复MQTT心跳");
+    resume_mqtt_after_upload(mqtt_stopped);
+    
+    g_is_uploading = false;
+    return final_result;
+}
 
 /**
  * @brief 专门为服务器请求上传所有图像文件（209命令专用）
@@ -562,3 +908,31 @@ static void resume_mqtt_after_upload(bool mqtt_stopped)
  * 
  * 打印系统的内存配置信息，用于调试内存相关问题
  */
+static void print_memory_info(void)
+{
+    ESP_LOGI(TAG, "=== 内存系统诊断 ===");
+    
+    // 基本堆信息
+    ESP_LOGI(TAG, "堆内存信息:");
+    ESP_LOGI(TAG, "  - 总可用堆: %ld 字节 (%.2f KB)", 
+             esp_get_free_heap_size(), esp_get_free_heap_size()/1024.0);
+    ESP_LOGI(TAG, "  - 最小可用堆: %ld 字节 (%.2f KB)", 
+             esp_get_minimum_free_heap_size(), esp_get_minimum_free_heap_size()/1024.0);
+    
+    // 各种内存类型的可用量
+    ESP_LOGI(TAG, "分类内存信息:");
+    ESP_LOGI(TAG, "  - 内部8位: %zu 字节", heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+    ESP_LOGI(TAG, "  - 内部32位: %zu 字节", heap_caps_get_free_size(MALLOC_CAP_32BIT | MALLOC_CAP_INTERNAL));
+    ESP_LOGI(TAG, "  - DMA内存: %zu 字节", heap_caps_get_free_size(MALLOC_CAP_DMA));
+    
+#if CONFIG_SPIRAM_BOOT_INIT
+    ESP_LOGI(TAG, "  - PSRAM: %zu 字节 (%.2f KB)", 
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM), 
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024.0);
+    ESP_LOGI(TAG, "  - PSRAM总大小: %zu 字节 (%.2f KB)", 
+             heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
+             heap_caps_get_total_size(MALLOC_CAP_SPIRAM)/1024.0);
+#endif
+    
+    ESP_LOGI(TAG, "====================");
+}

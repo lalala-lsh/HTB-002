@@ -1281,19 +1281,209 @@ void process_msg(esp_mqtt_client_handle_t client, char * msg, int msg_len)
  * @brief 从JSON数据中提取RCG_CODE并上传对应图片
  * @param json_data JSON格式的历史数据字符串
  */
+static void extract_and_upload_rcg_images(const char* json_data)
+{
+	if (!json_data) {
+		ESP_LOGW(TAG, "历史数据为空，跳过图片上传");
+		return;
+	}
+	
+	cJSON* data_root = cJSON_Parse(json_data);
+	if (!data_root) {
+		ESP_LOGE(TAG, "解析历史数据JSON失败: %s", json_data);
+		return;
+	}
+	
+	cJSON* rcg_code_item = cJSON_GetObjectItem(data_root, "RCG_CODE");
+	if (rcg_code_item && cJSON_IsNumber(rcg_code_item)) {
+		uint32_t rcg_code = (uint32_t)rcg_code_item->valueint;
+		
+		// 跳过无效的RCG_CODE
+		if (rcg_code == 0) {
+			ESP_LOGI(TAG, "RCG_CODE为0，跳过图片上传");
+			cJSON_Delete(data_root);
+			return;
+		}
+		
+		ESP_LOGI(TAG, "提取到RCG_CODE: %lu", rcg_code);
+		
+		// 检查是否有对应的图片
+		char file_paths[MAX_TEMP_IMAGES][272];
+		int image_count = get_images_by_rcg_code(rcg_code, file_paths, MAX_TEMP_IMAGES);
+		
+		if (image_count > 0) {
+			ESP_LOGI(TAG, "找到 %d 张RCG_CODE为 %lu 的历史图片，开始上传", image_count, rcg_code);
+			
+			// 带重试的图片上传
+			esp_err_t ret = ESP_FAIL;
+			for (int retry = 0; retry < MAX_IMAGE_UPLOAD_RETRIES; retry++) {
+				ret = upload_pictures(rcg_code);
+				if (ret == ESP_OK) {
+					ESP_LOGI(TAG, "RCG_CODE %lu 的历史图片上传成功", rcg_code);
+					break;
+				} else {
+					ESP_LOGW(TAG, "RCG_CODE %lu 的历史图片上传失败，重试 %d/%d，错误码: %d", 
+							rcg_code, retry + 1, MAX_IMAGE_UPLOAD_RETRIES, ret);
+					
+					if (retry < MAX_IMAGE_UPLOAD_RETRIES - 1) {
+						// 等待后再重试
+						vTaskDelay(pdMS_TO_TICKS(IMAGE_UPLOAD_RETRY_DELAY_MS));
+						
+						// 重新检查网络状态
+						if (get_wifi_status() != WIFI_STATE_CONNECTED) {
+							ESP_LOGW(TAG, "网络连接丢失，停止重试RCG_CODE %lu", rcg_code);
+							break;
+						}
+					}
+				}
+			}
+			
+			if (ret != ESP_OK) {
+				ESP_LOGE(TAG, "RCG_CODE %lu 的历史图片上传最终失败，已重试 %d 次", rcg_code, MAX_IMAGE_UPLOAD_RETRIES);
+			}
+		} else {
+			ESP_LOGI(TAG, "未找到RCG_CODE为 %lu 的历史图片文件", rcg_code);
+		}
+	} else {
+		ESP_LOGW(TAG, "历史数据中未找到有效的RCG_CODE字段: %s", json_data);
+	}
+	
+	cJSON_Delete(data_root);
+}
 
 /**
  * @brief 根据DAY_FLAG数组上传历史图片
  * @param day_flags DAY_FLAG JSON数组
  * @param device_mode_id 设备模式ID（1=哺光训练，2=弱视训练）
  */
+static void upload_historical_images_by_day_flags(cJSON* day_flags, int device_mode_id)
+{
+	if (!day_flags || !cJSON_IsArray(day_flags)) {
+		ESP_LOGW(TAG, "DAY_FLAG数组无效，跳过历史图片上传");
+		return;
+	}
+	
+	// 检查网络状态
+	if (get_wifi_status() != WIFI_STATE_CONNECTED) {
+		ESP_LOGW(TAG, "网络未连接，跳过历史图片上传");
+		return;
+	}
+	
+	// 只处理哺光训练数据
+	if (device_mode_id != RECORD_FD) {
+		ESP_LOGI(TAG, "不是哺光训练数据，无需上传图片");
+		return;
+	}
+	
+	int day_flag_size = cJSON_GetArraySize(day_flags);
+	ESP_LOGI(TAG, "准备处理 %d 天的历史图片上传", day_flag_size);
+	
+	// 遍历每一天的数据
+	for (int i = 0; i < day_flag_size; i++) {
+		cJSON* day_item = cJSON_GetArrayItem(day_flags, i);
+		if (!day_item || !cJSON_IsNumber(day_item)) {
+			continue;
+		}
+		
+		int day = day_item->valueint;
+		ESP_LOGI(TAG, "处理第 %d 天的历史数据", day);
+		
+		// 动态分配内存避免栈溢出
+		char (*temp_databuf)[DATA_CNTS] = malloc(10 * DATA_CNTS);
+		if (!temp_databuf) {
+			ESP_LOGE(TAG, "第 %d 天分配内存失败", day);
+			continue;
+		}
+		
+		// 重新读取这一天的历史数据
+		int32_t nums = get_day_record_data(day, RECORD_FD, temp_databuf);
+		
+		if (nums <= 0) {
+			ESP_LOGW(TAG, "第 %d 天没有找到历史数据", day);
+			free(temp_databuf);
+			continue;
+		}
+		
+		ESP_LOGI(TAG, "第 %d 天找到 %ld 条历史记录", day, nums);
+		
+		// 处理这一天的每条记录
+		for (int j = 0; j < nums; j++) {
+			ESP_LOGI(TAG, "处理历史记录 %d/%ld: %s", j+1, nums, temp_databuf[j]);
+			extract_and_upload_rcg_images(temp_databuf[j]);
+		}
+		
+		// 释放内存
+		free(temp_databuf);
+	}
+	
+	ESP_LOGI(TAG, "历史图片上传处理完成");
+}
 
 /**
  * @brief 图片上传任务，在独立任务中执行图片上传避免栈溢出
  * @param parameter 传入的参数结构指针
  */
+static void image_upload_task(void* parameter)
+{
+	image_upload_params_t* params = (image_upload_params_t*)parameter;
+	
+	if (!params) {
+		ESP_LOGE(TAG, "图片上传任务参数为空");
+		vTaskDelete(NULL);
+		return;
+	}
+	
+	ESP_LOGI(TAG, "图片上传任务开始执行");
+	
+	// 执行图片上传
+	upload_historical_images_by_day_flags(params->day_flags, params->device_mode_id);
+	
+	// 清理资源
+	if (params->day_flags) {
+		cJSON_Delete(params->day_flags);
+	}
+	free(params);
+	
+	// 清除任务句柄
+	image_upload_task_handle = NULL;
+	
+	ESP_LOGI(TAG, "图片上传任务完成，任务即将结束");
+	
+	// 删除自己
+	vTaskDelete(NULL);
+}
 
 /**
  * @brief 服务器请求上传任务（209命令专用），在独立任务中执行图片上传避免MQTT任务栈溢出
  * @param parameter 传入的参数结构指针
  */
+static void server_request_upload_task(void* parameter)
+{
+	server_upload_params_t* params = (server_upload_params_t*)parameter;
+	
+	if (!params) {
+		ESP_LOGE(TAG, "服务器上传任务参数为空");
+		vTaskDelete(NULL);
+		return;
+	}
+	
+	ESP_LOGI(TAG, "服务器请求上传任务开始执行，ucode=%d", params->ucode);
+	
+	// 执行图片上传
+	esp_err_t ret = upload_all_pictures_for_server(params->ucode);
+	
+	// 发送回复消息
+	const char* result = (ret == ESP_OK) ? "SUCCESS" : "FAIL";
+	build_device_parameters_process_reply(9, params->ucode, result, params->rid);
+	
+	ESP_LOGI(TAG, "服务器请求上传任务完成，结果: %s", result);
+	
+	// 清理资源
+	free(params);
+	
+	// 清除任务句柄
+	server_upload_task_handle = NULL;
+	
+	// 删除自己
+	vTaskDelete(NULL);
+}
