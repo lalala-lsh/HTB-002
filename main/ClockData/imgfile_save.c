@@ -336,6 +336,35 @@ void end_training_session(void)
 /**
  * @brief 清理临时存储（用于训练意外中断时）
  */
+void cleanup_temp_storage(void)
+{
+    if (!temp_storage.training_active) {
+        ESP_LOGW(TAG, "没有活动的训练会话需要清理");
+        return;
+    }
+
+    ESP_LOGW(TAG, "训练会话意外中断，清理临时存储:");
+    ESP_LOGW(TAG, "  - RCG_CODE: %lu", temp_storage.current_rcg_code);
+
+    int cleaned_count = 0;
+    for (int i = 0; i < MAX_TEMP_IMAGES; i++) {
+        if (temp_storage.images[i].used && temp_storage.images[i].data) {
+            ESP_LOGW(TAG, "  - 清理临时图片 %d (大小: %d 字节)", i, temp_storage.images[i].size);
+            free(temp_storage.images[i].data);
+            temp_storage.images[i].data = NULL;
+            temp_storage.images[i].used = false;
+            cleaned_count++;
+        }
+    }
+
+    ESP_LOGW(TAG, "临时存储清理完成:");
+    ESP_LOGW(TAG, "  - 清理图片数量: %d", cleaned_count);
+    ESP_LOGW(TAG, "  - 注意：这些图片未保存到SPIFFS，对应的检测计数应为0");
+
+    temp_storage.training_active = false;
+    temp_storage.current_index = 0;
+    temp_storage.current_rcg_code = 0;
+}
 
 /**
  * @brief 保存闭眼图片到临时存储
