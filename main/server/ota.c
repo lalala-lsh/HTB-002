@@ -32,6 +32,30 @@ extern QueueHandle_t voice_evt_queue;
  * @param err 错误码
  * @return uint8_t 编号（1-9），0表示正常或未知错误，不记录
  */
+static uint8_t map_ota_error_to_code(esp_err_t err)
+{
+    switch(err) {
+        case ESP_ERR_INVALID_ARG: return 1;
+        case ESP_ERR_NOT_SUPPORTED: return 2;
+        case ESP_ERR_NOT_FOUND: return 3;
+        case ESP_ERR_HTTPS_OTA_IN_PROGRESS: return 4;
+        case ESP_ERR_OTA_VALIDATE_FAILED: return 5;
+        case ESP_ERR_NO_MEM: return 6;
+#ifdef ESP_ERR_FLASH_OP_FAIL
+        case ESP_ERR_FLASH_OP_FAIL: return 7;
+#endif
+        case ESP_ERR_FLASH_OP_TIMEOUT: return 7;
+        case ESP_ERR_INVALID_VERSION: return 8;
+        default:
+            // 检查是否是HTTP/网络相关错误（错误码通常在特定范围内）
+            // HTTP错误码通常在ESP_ERR_HTTP_BASE (0x7000) 范围内
+            // 或者transport错误（负数，通常在-60000到-50000范围）
+            if ((err < 0 && err > -70000) || (err >= 0x7000 && err < 0x8000)) {
+                return 9;  // 网络连接失败
+            }
+            return 0; // 正常或未知错误，不记录
+    }
+}
 
 /**
  * @brief 获取当前OTA状态
@@ -219,6 +243,158 @@ static esp_err_t _http_client_init_cb(esp_http_client_handle_t http_client)
  * 
  * @param pvParameter 任务参数（未使用）
  */
+static void advanced_ota_example_task(void *pvParameter)
+{
+    ESP_LOGI(TAG, "Starting Advanced OTA example");
+
+    // 配置HTTP客户端信息（优化内存使用）
+    esp_err_t ota_finish_err = ESP_OK;
+    esp_http_client_config_t config = {
+        .url = adress,
+        .timeout_ms = 15000,  // 15秒超时
+        .keep_alive_enable = true, 
+        .buffer_size = 2048,  // 减小HTTP接收缓冲区至2KB
+        .buffer_size_tx = 1024,  // 减小HTTP发送缓冲区至1KB
+        .disable_auto_redirect = false,  // 允许重定向
+        .max_redirection_count = 3,  // 最大重定向次数
+    };
+    
+    // HTTP连接不需要证书校验
+    
+    // OTA参数配置
+    ESP_LOGI(TAG, "OTA固件下载地址:%s", config.url);
+    esp_https_ota_config_t ota_config = {
+        .http_config = &config,
+        .http_client_init_cb = _http_client_init_cb, // 注册HTTP客户端初始化回调
+#ifdef CONFIG_EXAMPLE_ENABLE_PARTIAL_HTTP_DOWNLOAD  // 是否启用HTTP部分文件下载
+        .partial_http_download = true,
+        .max_http_request_size = CONFIG_EXAMPLE_HTTP_REQUEST_SIZE,
+#endif
+    };
+
+    // 开始OTA升级流程
+    esp_https_ota_handle_t https_ota_handle = NULL;
+    
+    // 将HTTPS地址转换为HTTP地址
+    if (strncmp(adress, "https://", 8) == 0) {
+        char http_url[256];
+        snprintf(http_url, sizeof(http_url), "http://%s", adress + 8);
+        ESP_LOGI(TAG, "将HTTPS地址转换为HTTP: %s", http_url);
+        config.url = http_url;
+    } else {
+        ESP_LOGI(TAG, "使用原地址: %s", adress);
+        config.url = adress;
+    }
+    
+    ESP_LOGI(TAG, "正在连接到OTA服务器...");
+    
+    // 增强的HTTP连接重试机制
+    esp_err_t err = ESP_FAIL;
+    int retry_count = 0;
+    const int max_retries = 3;
+    const int retry_delay_ms[] = {2000, 5000, 10000}; // 递增延迟
+    
+    for (retry_count = 0; retry_count <= max_retries; retry_count++) {
+        err = esp_https_ota_begin(&ota_config, &https_ota_handle);
+        
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "HTTP OTA连接建立成功 (第%d次尝试)", retry_count + 1);
+            break;
+        }
+        
+        ESP_LOGE(TAG, "HTTP OTA连接失败 (第%d次尝试), error: 0x%x (%s)", 
+                 retry_count + 1, err, esp_err_to_name(err));
+        
+        if (retry_count < max_retries) {
+            ESP_LOGI(TAG, "等待%d秒后重试...", retry_delay_ms[retry_count] / 1000);
+            vTaskDelay(retry_delay_ms[retry_count] / portTICK_PERIOD_MS);
+        }
+    }
+    
+    // 如果所有重试都失败
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP OTA连接失败，已尝试%d次", max_retries + 1);
+        
+        // 保存OTA失败日志
+        uint8_t ota_error = map_ota_error_to_code(err);
+        time_t ota_error_time = time(NULL);
+        save_device_logs_to_nvs(ota_error, 0, ota_error_time, 0);
+        
+        ota_status = OTA_STATUS_FAIL;
+        vTaskDelete(NULL);
+    }
+
+    // 获取固件描述信息
+    esp_app_desc_t app_desc;
+    err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_https_ota_read_img_desc failed");
+        goto ota_end;
+    }
+    
+    // 验证固件头部信息
+    err = validate_image_header(&app_desc);  
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "image header verification failed");
+        goto ota_end;
+    }
+
+    // 执行固件下载与升级流程
+    while (1) {
+        err = esp_https_ota_perform(https_ota_handle);
+        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            // 如果返回值不为ESP_ERR_HTTPS_OTA_IN_PROGRESS，表示下载完成或出错
+            break;
+        }
+        ESP_LOGD(TAG, "Image bytes read: %d", esp_https_ota_get_image_len_read(https_ota_handle));
+    }
+
+    // 检查固件数据是否完整接收
+    if (esp_https_ota_is_complete_data_received(https_ota_handle) != true) {
+        ESP_LOGE(TAG, "Complete data was not received.");
+        goto ota_end;
+    } else {
+        ESP_LOGI(TAG, "拉取bin文件成功");
+        ota_finish_err = esp_https_ota_finish(https_ota_handle); // 完成升级过程
+        
+        // 判断升级结果并处理
+        if ((err == ESP_OK) && (ota_finish_err == ESP_OK)) {
+            ESP_LOGI(TAG, "ESP_HTTPS_OTA upgrade successful. Rebooting ...");
+            play_voice(OTA_SUCCESS); // 播放升级成功提示音
+            vTaskDelay(3000 / portTICK_PERIOD_MS);
+            esp_restart(); // 重启设备应用新固件
+        } else {
+            if (ota_finish_err == ESP_ERR_OTA_VALIDATE_FAILED) {
+                ESP_LOGE(TAG, "Image validation failed, image is corrupted");
+            }
+            ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed 0x%x", ota_finish_err);
+            
+            // 保存OTA失败日志
+            uint8_t ota_error = map_ota_error_to_code(ota_finish_err);
+            time_t ota_error_time = time(NULL);
+            save_device_logs_to_nvs(ota_error, 0, ota_error_time, 0);
+            
+            vTaskDelete(NULL);
+        }
+    }
+
+    // 如果升级失败，执行清理
+ota_end:
+    esp_https_ota_abort(https_ota_handle);
+    ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed");
+    
+    // 保存OTA失败日志（使用err作为错误码）
+    uint8_t ota_error = map_ota_error_to_code(err);
+    if (ota_error == 0 && ota_finish_err != ESP_OK) {
+        // 如果err映射为0，尝试使用ota_finish_err
+        ota_error = map_ota_error_to_code(ota_finish_err);
+    }
+    time_t ota_error_time = time(NULL);
+    save_device_logs_to_nvs(ota_error, 0, ota_error_time, 0);
+    
+    play_voice(OTA_FAIL); // 播放升级失败提示音
+    vTaskDelete(NULL);
+}
 
 /**
  * @brief 启动OTA升级流程
