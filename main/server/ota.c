@@ -403,5 +403,50 @@ ota_end:
  * 
  * @param adr OTA固件下载地址
  */
+void OTA_function(char* adr)
+{
+    ESP_LOGI(TAG, "OTA_function 函数运行");
+ 
+    /* 保存OTA固件下载地址 */
+    strncpy(adress, adr, strlen(adr)); 
+
+    /* NVS初始化 */
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+    ESP_LOGI(TAG, "NVS 初始化完成");
+
+    /* 注册OTA事件处理函数 */
+    // 默认事件循环只应该初始化1次，在wifi初始化时已经创建过一次
+    ESP_ERROR_CHECK(esp_event_handler_register(ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+
+    /* 取消固件回滚（如果处于待验证状态） */
+#if 1
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+                ESP_LOGI(TAG, "App is valid, rollback cancelled successfully");
+            } else {
+                ESP_LOGE(TAG, "Failed to cancel rollback");
+            }
+        }
+    }
+#endif
+
+    /* 启用WiFi省电模式，降低OTA期间功耗 */
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM); 
+
+    /* 创建OTA任务（减少栈大小节约内存）*/
+    if (xTaskCreate(advanced_ota_example_task, "ota_task", 1024 * 5, NULL, 9, NULL) == pdPASS) {
+        ESP_LOGI(TAG, "ota_task 创建成功（5KB栈）");
+    } else {
+        ESP_LOGE(TAG, "ota_task 创建失败");
+    }
+}
 
 

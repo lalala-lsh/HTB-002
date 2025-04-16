@@ -381,6 +381,12 @@ static void voice_task(void* arg)
                 ESP_LOGI(TAG, "训练模式下跳过低电量语音播报: cmd=0x%x", cmd);
                 // 不播放语音，不执行任何音频操作
             } 
+            else if(is_cmd_in_group(cmd, OTA_CMDS, sizeof(OTA_CMDS))) {
+                // OTA相关命令
+                vTaskDelay(2500 / portTICK_PERIOD_MS);
+                // 播放完成后停止，避免重复播放
+                Line_2A_WT588F(0xFE);
+            }
             else {
                 // 其他命令，播放完成后使用统一的音乐恢复逻辑
                 handle_voice_music_recovery(cmd, 2500); // 使用统一的恢复逻辑
