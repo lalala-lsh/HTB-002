@@ -258,6 +258,11 @@ void play_voice(uint8_t command)
  * 
  * 立即停止当前正在播放的语音
  */
+void stop_voice(void)
+{
+    uint8_t stop_cmd = STOP;
+    xQueueSend(voice_evt_queue, &stop_cmd, 0);
+}
 
 /**
  * @brief 控制语音芯片电源（外部接口）
