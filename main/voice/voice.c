@@ -87,6 +87,34 @@ static void Line_2A_WT588F(uint8_t data)
  * 发送循环播放命令到WT588F芯片
  * 注意：确保MUSIC地址和循环命令0xF2的原子性，避免被其他语音命令打断
  */
+static void drv_music_cycle_commd(void)
+{
+    ESP_LOGI(TAG, "发送背景音乐循环命令: MUSIC(0x%x) + 0xF2", MUSIC);
+    
+    // 暂停任务调度，确保背景音乐命令的原子性
+    vTaskSuspendAll();
+    
+    // 先发送停止命令，确保芯片处于干净状态
+    Line_2A_WT588F(0xFE);
+    esp_rom_delay_us(2000); // 等待停止命令生效
+    
+    // 发送音乐地址
+    Line_2A_WT588F(MUSIC);
+    esp_rom_delay_us(10000); // 增加延时到10ms，确保地址命令被完全处理
+    
+    // 发送循环播放命令
+    Line_2A_WT588F(0xF2); // 循环播放当前BGM
+    esp_rom_delay_us(2000); // 等待循环命令生效
+    
+    // 恢复任务调度
+    xTaskResumeAll();
+    
+    // WT588F芯片停止命令可能重置音量，需要重新设置（在任务调度恢复后）
+    update_volume();
+    esp_rom_delay_us(5000); // 等待音量设置生效
+    
+    ESP_LOGI(TAG, "背景音乐循环命令发送完成");
+}
 
 /**
  * @brief 控制背景音乐循环播放
@@ -314,6 +342,14 @@ static void voice_task(void* arg)
 #if DEBUG_
             ESP_LOGI(TAG, "调用语音指令：0x%x", cmd);
 #endif
+            
+            // STOP命令单独处理
+            if(cmd == STOP) {
+                training_flag = false;
+                stop_background_music(); // 停止背景音乐
+                Line_2A_WT588F(0xFE); // 停止播放
+                continue;
+            }
             
             // 只对特定命令停止背景音乐，避免重复启动
             if(is_cmd_in_group(cmd, STOP_BGM_CMDS, sizeof(STOP_BGM_CMDS))) {
