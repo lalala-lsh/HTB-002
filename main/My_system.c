@@ -23,6 +23,14 @@
 static const char *TAG = "INIT";
 extern bool WELCOME_flag;//开机语音标志位   linjun
 
+static void log_boot_reset_reason(void)
+{
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    uint8_t reboot_reason = map_reset_reason_to_code(reset_reason);
+    time_t reboot_time = get_safe_timestamp();
+    save_device_logs_to_nvs(0, reboot_reason, 0, reboot_time);
+    ESP_LOGI("INIT", "保存重启原因日志，编号:%u", reboot_reason);
+}
 
 void SystemInit(void)
 {  

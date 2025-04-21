@@ -1375,6 +1375,35 @@ time_t load_last_valid_time_from_nvs(void)
  * @param reason 重启原因枚举值
  * @return uint8_t 编号（0-14），0表示未知也记录
  */
+uint8_t map_reset_reason_to_code(esp_reset_reason_t reason)
+{
+    switch(reason) {
+        case ESP_RST_UNKNOWN: return 0;
+        case ESP_RST_POWERON: return 1;
+        case ESP_RST_EXT: return 2;
+        case ESP_RST_SW: return 3;
+        case ESP_RST_PANIC: return 4;
+        case ESP_RST_INT_WDT: return 5;
+        case ESP_RST_TASK_WDT: return 6;
+        case ESP_RST_WDT: return 7;
+        case ESP_RST_DEEPSLEEP: return 8;
+        case ESP_RST_BROWNOUT: return 9;
+        case ESP_RST_SDIO: return 10;
+#ifdef ESP_RST_USB
+        case ESP_RST_USB: return 11;
+#endif
+#ifdef ESP_RST_JTAG
+        case ESP_RST_JTAG: return 12;
+#endif
+#ifdef ESP_RST_PWR_GLITCH
+        case ESP_RST_PWR_GLITCH: return 13;
+#endif
+#ifdef ESP_RST_CPU_LOCKUP
+        case ESP_RST_CPU_LOCKUP: return 14;
+#endif
+        default: return 0; // 未知
+    }
+}
 
 /**
  * @brief 保存设备日志到NVS
@@ -1384,6 +1413,134 @@ time_t load_last_valid_time_from_nvs(void)
  * @param reboot_time 重启时间戳（0表示未发生异常重启）
  * @return esp_err_t ESP_OK表示成功，其他表示失败
  */
+esp_err_t save_device_logs_to_nvs(uint8_t ota_error, uint8_t reboot_reason, time_t ota_error_time, time_t reboot_time)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, LOG_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("DEVICE_LOGS", "打开NVS分区失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    cJSON *logs_array = NULL;
+    char *existing = NULL;
+    size_t required_size = 0;
+    err = nvs_get_str(my_handle, LOG_KEY, NULL, &required_size);
+    if (err == ESP_OK && required_size > 1) {
+        existing = (char *)malloc(required_size);
+        if (existing && nvs_get_str(my_handle, LOG_KEY, existing, &required_size) == ESP_OK) {
+            cJSON *root = cJSON_Parse(existing);
+            if (cJSON_IsArray(root)) {
+                logs_array = root;
+                root = NULL;
+            } else if (cJSON_IsObject(root)) {
+                logs_array = cJSON_CreateArray();
+                if (logs_array) {
+                    cJSON_AddItemToArray(logs_array, root);
+                    root = NULL;
+                }
+            }
+            if (root) {
+                cJSON_Delete(root);
+            }
+        }
+    }
+
+    if (!logs_array || !cJSON_IsArray(logs_array)) {
+        if (logs_array) {
+            cJSON_Delete(logs_array);
+        }
+        logs_array = cJSON_CreateArray();
+    }
+
+    if (logs_array == NULL || !cJSON_IsArray(logs_array)) {
+        ESP_LOGE("DEVICE_LOGS", "创建日志数组失败");
+        if (existing) {
+            free(existing);
+        }
+        nvs_close(my_handle);
+        return ESP_ERR_NO_MEM;
+    }
+
+    while (cJSON_GetArraySize(logs_array) >= LOG_MAX_ENTRIES) {
+        cJSON_DeleteItemFromArray(logs_array, 0);
+    }
+
+    char ota_error_time_str[24] = {0};
+    char reboot_time_str[24] = {0};
+    if (ota_error_time > 0) {
+        struct tm tm_time;
+        localtime_r(&ota_error_time, &tm_time);
+        strftime(ota_error_time_str, sizeof(ota_error_time_str), "%Y-%m-%d %H:%M:%S", &tm_time);
+    }
+    if (reboot_time > 0) {
+        struct tm tm_time;
+        localtime_r(&reboot_time, &tm_time);
+        strftime(reboot_time_str, sizeof(reboot_time_str), "%Y-%m-%d %H:%M:%S", &tm_time);
+    }
+    if (ota_error_time_str[0] != '\0') {
+        char ota_line[40];
+        snprintf(ota_line, sizeof(ota_line), "[%s]: %03u", ota_error_time_str, ota_error);
+        cJSON *item = cJSON_CreateString(ota_line);
+        if (item) {
+            cJSON_AddItemToArray(logs_array, item);
+        }
+    }
+    if (reboot_time_str[0] != '\0') {
+        char reboot_line[40];
+        snprintf(reboot_line, sizeof(reboot_line), "[%s]: %03u", reboot_time_str, reboot_reason + 100);
+        cJSON *item = cJSON_CreateString(reboot_line);
+        if (item) {
+            cJSON_AddItemToArray(logs_array, item);
+        }
+    }
+
+    char *logs_json = cJSON_PrintUnformatted(logs_array);
+    if (!logs_json) {
+        ESP_LOGE("DEVICE_LOGS", "序列化日志失败");
+        cJSON_Delete(logs_array);
+        if (existing) {
+            free(existing);
+        }
+        nvs_close(my_handle);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 存储日志
+    err = nvs_set_str(my_handle, LOG_KEY, logs_json);
+    if (err != ESP_OK) {
+        ESP_LOGE("DEVICE_LOGS", "存储日志失败: %s", esp_err_to_name(err));
+        cJSON_free(logs_json);
+        cJSON_Delete(logs_array);
+        if (existing) {
+            free(existing);
+        }
+        nvs_close(my_handle);
+        return err;
+    }
+
+    // 提交更改
+    err = nvs_commit(my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("DEVICE_LOGS", "提交日志失败: %s", esp_err_to_name(err));
+        cJSON_free(logs_json);
+        cJSON_Delete(logs_array);
+        if (existing) {
+            free(existing);
+        }
+        nvs_close(my_handle);
+        return err;
+    }
+
+    ESP_LOGI("DEVICE_LOGS", "日志保存成功: %s", logs_json);
+    cJSON_free(logs_json);
+    cJSON_Delete(logs_array);
+    if (existing) {
+        free(existing);
+    }
+    nvs_close(my_handle);
+    return ESP_OK;
+}
 
 /**
  * @brief 从NVS读取设备日志
@@ -1391,8 +1548,59 @@ time_t load_last_valid_time_from_nvs(void)
  * @param max_len 缓冲区最大长度
  * @return esp_err_t ESP_OK表示成功，ESP_ERR_NVS_NOT_FOUND表示没有日志，其他表示失败
  */
+esp_err_t get_device_logs_from_nvs(char *logs_json, size_t max_len)
+{
+    if (!logs_json || max_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, LOG_SPACENAME, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("DEVICE_LOGS", "打开NVS失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t required_size = max_len;
+    err = nvs_get_str(handle, LOG_KEY, logs_json, &required_size);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI("DEVICE_LOGS", "没有日志");
+    } else if (err == ESP_ERR_NVS_INVALID_LENGTH) {
+        ESP_LOGE("DEVICE_LOGS", "缓冲区太小，需要至少 %u 字节", (unsigned)required_size);
+    } else if (err != ESP_OK) {
+        ESP_LOGE("DEVICE_LOGS", "读取日志失败: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI("DEVICE_LOGS", "读取日志成功: %s", logs_json);
+    }
+
+    nvs_close(handle);
+    return err;
+}
 
 
 /**
  * @brief 清除NVS中的设备日志
  */
+void clear_device_logs_from_nvs(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open_from_partition(PROJECT_STORAGE_PARTITION, LOG_SPACENAME, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("DEVICE_LOGS", "打开NVS分区失败: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // 删除日志key
+    err = nvs_erase_key(my_handle, LOG_KEY);
+    if (err == ESP_OK) {
+        nvs_commit(my_handle);
+        ESP_LOGI("DEVICE_LOGS", "日志清除成功");
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI("DEVICE_LOGS", "NVS中没有日志信息，无需清除");
+    } else {
+        ESP_LOGE("DEVICE_LOGS", "清除日志失败: %s", esp_err_to_name(err));
+    }
+
+    nvs_close(my_handle);
+}

@@ -444,6 +444,23 @@ static void voice_task(void* arg)
  * 
  * 测试语音芯片的基本功能，包括电源控制
  */
+void test_voice_module(void)
+{
+    ESP_LOGI(TAG, "开始语音模块测试");
+    
+    // 测试电源控制
+    voice_power_control(false);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    voice_power_control(true);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 测试简单语音播放
+    Line_2A_WT588F(WELCOME);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    Line_2A_WT588F(0xFE); // 停止播放
+    
+    ESP_LOGI(TAG, "语音模块测试完成");
+}
 
 /**
  * @brief 语音模块初始化
